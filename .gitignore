@@ -1,0 +1,16 @@
+# ---- 构建产物（mvn clean package 生成，可重新生成） ----
+target/
+
+# ---- IDE（IntelliJ） ----
+.idea/
+*.iml
+
+# ---- macOS 垃圾 ----
+.DS_Store
+
+# ---- 运行时覆盖率输出（agent 挂载后生成的 coverage-<key>.exec） ----
+coverage/
+*.exec
+
+# 说明：lib/ 故意不忽略——里面是定制版 jacoco/asm（不在 Maven Central），
+# setup-m2.sh 需从 lib/ 安装到本地 ~/.m2，clone 后缺它无法 mvn package。
