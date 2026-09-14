@@ -34,7 +34,9 @@ import java.util.jar.JarFile;
  *        --execdir coverage --classes target/out --classes lib/foo.jar \
  *        --sources src/main/java --out reports
  *
- * 报告写到 out/&lt;key&gt;/index.html
+ * 报告写到 out/&lt;key&gt;/index.html（每个用户一份）。
+ * 加 --merge 则把 execdir 下所有 coverage-*.exec 按 classId OR 合并，
+ * 产出一份全员并集报告 out/all/index.html。
  * --sources 可传多个源码根目录；不传则只展示行覆盖率，不渲染源码。
  */
 public final class ReportCli {
@@ -44,6 +46,7 @@ public final class ReportCli {
         String outDir = null;
         String baselineOut = null;   // 非零：把该 exec 的基线（方法级覆盖）写到此文件
         String baselineIn = null;    // 非零：携带合并模式，读此基线文件
+        boolean merge = false;       // 非零：合并 execdir 下所有用户的 exec，产出一份全员覆盖率报告
         List<String> classPaths = new ArrayList<>();
         List<String> sourcePaths = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
@@ -66,13 +69,16 @@ public final class ReportCli {
                 case "--baseline":
                     baselineIn = args[++i];
                     break;
+                case "--merge":
+                    merge = true;
+                    break;
                 default:
                     System.err.println("[peruser-report] unknown arg: " + args[i]);
             }
         }
         if (execDir == null || classPaths.isEmpty()) {
             System.err.println("usage: ReportCli --execdir DIR --classes PATH... [--sources SRC...]"
-                    + " [--out DIR] [--baseline-out FILE | --baseline FILE]");
+                    + " [--out DIR] [--merge] [--baseline-out FILE | --baseline FILE]");
             System.exit(2);
         }
         if (baselineIn != null && outDir == null) {
@@ -89,6 +95,43 @@ public final class ReportCli {
         if (execs == null || execs.length == 0) {
             System.err.println("[peruser-report] no .exec found in " + execDir);
             System.exit(3);
+        }
+
+        if (merge) {
+            // 全员合并模式：把所有 coverage-<key>.exec 的探针按 classId OR 合并，
+            // 产出一份覆盖「所有用户」的并集报告。可选 --baseline 携带历史构建覆盖。
+            if (outDir == null) {
+                System.err.println("[peruser-report] --merge 模式需要 --out DIR");
+                System.exit(2);
+            }
+            ExecFileLoader loader = new ExecFileLoader();
+            for (File exec : execs) {
+                try (InputStream in = Files.newInputStream(exec.toPath())) {
+                    loader.load(in);
+                }
+            }
+            ExecutionDataStore store = loader.getExecutionDataStore();
+            File mergedOut = new File(outRoot, "all");
+            if (baselineIn != null) {
+                BaselineStore baseline = BaselineStore.read(new File(baselineIn));
+                BaselineReport.generate(store, classPaths, sourcePaths, baseline, mergedOut, "all");
+            } else {
+                CoverageBuilder cb = new CoverageBuilder();
+                Analyzer analyzer = new Analyzer(store, cb);
+                for (String cp : classPaths) {
+                    analyzePathInto(analyzer, new File(cp));
+                }
+                mergedOut.mkdirs();
+                HTMLFormatter fmt = new HTMLFormatter();
+                IMultiReportOutput mo = new FileMultiReportOutput(mergedOut);
+                IReportVisitor v = fmt.createVisitor(mo);
+                v.visitInfo(Collections.emptyList(), store.getContents());
+                v.visitBundle(cb.getBundle("all-users"), createSourceLocator(sourcePaths));
+                v.visitEnd();
+            }
+            System.out.println("[peruser-report] MERGED " + execs.length + " user(s) -> "
+                    + mergedOut.getAbsolutePath() + "/index.html");
+            return;
         }
 
         for (File exec : execs) {
