@@ -31,7 +31,6 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
