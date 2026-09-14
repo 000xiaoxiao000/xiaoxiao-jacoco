@@ -42,6 +42,8 @@ public final class ReportCli {
     public static void main(String[] args) throws Exception {
         String execDir = null;
         String outDir = null;
+        String baselineOut = null;   // 非零：把该 exec 的基线（方法级覆盖）写到此文件
+        String baselineIn = null;    // 非零：携带合并模式，读此基线文件
         List<String> classPaths = new ArrayList<>();
         List<String> sourcePaths = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
@@ -58,17 +60,30 @@ public final class ReportCli {
                 case "--sources":
                     sourcePaths.add(args[++i]);
                     break;
+                case "--baseline-out":
+                    baselineOut = args[++i];
+                    break;
+                case "--baseline":
+                    baselineIn = args[++i];
+                    break;
                 default:
                     System.err.println("[peruser-report] unknown arg: " + args[i]);
             }
         }
-        if (execDir == null || outDir == null || classPaths.isEmpty()) {
-            System.err.println("usage: ReportCli --execdir DIR --classes PATH... --sources SRC... --out DIR");
+        if (execDir == null || classPaths.isEmpty()) {
+            System.err.println("usage: ReportCli --execdir DIR --classes PATH... [--sources SRC...]"
+                    + " [--out DIR] [--baseline-out FILE | --baseline FILE]");
+            System.exit(2);
+        }
+        if (baselineIn != null && outDir == null) {
+            System.err.println("[peruser-report] --baseline 模式需要 --out DIR");
             System.exit(2);
         }
 
-        File outRoot = new File(outDir);
-        outRoot.mkdirs();
+        File outRoot = (outDir == null) ? null : new File(outDir);
+        if (outRoot != null) {
+            outRoot.mkdirs();
+        }
 
         File[] execs = new File(execDir).listFiles((d, n) -> n.endsWith(".exec"));
         if (execs == null || execs.length == 0) {
@@ -84,10 +99,30 @@ public final class ReportCli {
             }
             ExecutionDataStore store = loader.getExecutionDataStore();
 
+            if (baselineOut != null) {
+                // 仅采集基线（Build N 跑完后）：方法级覆盖 -> JSON
+                BaselineStore bs = BaselineStore.build(store, classPaths);
+                bs.build = key;
+                bs.write(new File(baselineOut));
+                System.out.println("[peruser-report] baseline key=" + key + " -> "
+                        + new File(baselineOut).getAbsolutePath() + " (methods=" + bs.entries.size() + ")");
+                continue;
+            }
+
+            if (baselineIn != null) {
+                // 携带合并模式（Build N+1）：读基线 + 本次 exec，在探针层回填未变方法的覆盖，
+                // 产出与官方一致的标准 JaCoCo HTML 报告
+                BaselineStore baseline = BaselineStore.read(new File(baselineIn));
+                File keyOut = new File(outRoot, key);
+                BaselineReport.generate(store, classPaths, sourcePaths, baseline, keyOut, key);
+                continue;
+            }
+
+            // 默认：标准 JaCoCo HTML 报告（无携带）
             CoverageBuilder cb = new CoverageBuilder();
             Analyzer analyzer = new Analyzer(store, cb);
             for (String cp : classPaths) {
-                analyzePath(analyzer, new File(cp));
+                analyzePathInto(analyzer, new File(cp));
             }
 
             File keyOut = new File(outRoot, key);
@@ -105,7 +140,7 @@ public final class ReportCli {
         }
     }
 
-    private static void analyzePath(Analyzer analyzer, File f) throws IOException {
+    static void analyzePathInto(Analyzer analyzer, File f) throws IOException {
         if (f.isDirectory()) {
             try (java.util.stream.Stream<Path> stream = Files.walk(f.toPath())) {
                 List<Path> files = stream

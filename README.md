@@ -73,6 +73,40 @@ java -cp peruser-jacoco.jar peruser.ReportCli \
 报告生成在 `reports/<key>/index.html`。**注意**：`--classes` 要传**原始（磁盘上未插桩）**的 class 文件，
 用来做行/分支映射；agent 在内存里改的是运行时的类，磁盘 class 不动。
 
+### 3.1 跨构建增量：保留未改接口的覆盖率（方法级携带）
+默认 `merge-on-dump` 按 `classId` 合并，**只能在「类的字节码没变」时**跨构建保留覆盖。
+若两个接口在同一个类里、其中一个被改（如 `Web3Controller` 的 `/login` 与 `/query`，改了 `/query`），
+整个类重编译、`classId` 变了 → 旧 build 里 `/login` 的探针在新 build 报告里被静默丢弃。
+
+解决：用**方法级 hash 携带**（不依赖 git），并在**探针层**做增量注入，使最终报告是
+**与官方 `jacococli report` 完全一致的标准 JaCoCo 报告**（含 `jacoco-resources`、包目录树、源码视图），
+而不是自绘 HTML。思路：
+1. Build N 跑完后，采基线：每个方法的源码 hash（`MethodHasher`，排除行号等调试属性）映射到「哪些行被覆盖」。
+2. Build N+1 跑部分接口后，离线用 JaCoCo 插桩原始 class + ASM 扫描出「方法→探针→行」映射，
+   对 `className#methodHash` 命中的方法，按**相对行偏移**把基线覆盖行的探针置 `true`，
+   再喂回 JaCoCo 原生 `HTMLFormatter` → 未改方法（如 `/login`）的覆盖显示为绿色 `covered`，
+   改过的方法（如 `/query`）只用本次真实执行。
+
+```bash
+# 第 1 步：Build 0001 跑完，采集基线（JSON）
+java -cp peruser-jacoco.jar peruser.ReportCli \
+     --execdir coverage --classes /path/to/build1-classes \
+     --baseline-out baseline-0001.json
+
+# 第 2 步：Build 0002 部署后只跑了部分接口，生成「携带合并」标准报告
+java -cp peruser-jacoco.jar peruser.ReportCli \
+     --execdir coverage --classes /path/to/build2-classes --sources /path/to/build2-src \
+     --baseline baseline-0001.json --out reports
+```
+报告在 `reports/<key>/index.html`，即与官方一致的标准 JaCoCo 报告（`<key>` 来自 `coverage-<key>.exec`，
+如 `X-Coverage-Key: 1` → `reports/1/index.html`）。携带的行就是普通绿色 covered，总数也包含历史覆盖。
+只携带 build N **真实覆盖**的行，不会伪造覆盖。
+
+> 实现要点：内置定制版 JaCoCo 用「`$jacocoData` 常量动态 + 局部变量」持有探针数组，探针存储指令为
+> `aload <var>; 探针id; iconst_1; bastore`，注入逻辑据此解析（与官方 `jacococli` 行为对齐）。
+> 基线按 `className#methodHash` 索引，**同一类内**方法体未变才携带，避免不同类里同体方法
+> （`toString`/`equals`/getter、空构造等）因 methodHash 碰撞而跨类误携带。
+
 ## 构建（自己重新生成 peruser-jacoco.jar）
 工程现在用 **Maven**（`pom.xml`）构建，产物是 self-contained fat agent（内嵌 asm+jacoco、带 Premain-Class/Agent-Class 清单），目标 JVM 零依赖接入。
 你改完 `src/peruser/*.java` 后，一条命令即可重出 agent jar：
