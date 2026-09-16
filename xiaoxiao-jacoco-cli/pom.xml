@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xiaoxiao</groupId>
+        <artifactId>xiaoxiao-jacoco</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>xiaoxiao-jacoco-cli</artifactId>
+    <packaging>jar</packaging>
+
+    <name>xiaoxiao-jacoco-cli</name>
+    <description>
+        xiaoxiao-jacoco cli：离线命令行工具，与官方 jacococli 用法一致，并扩展了按 key 报告 / 基线能力。
+        支持 JaCoCo cli 的【全部】命令：report / merge / dump / instrument / classinfo / execinfo / version / help。
+
+        打包：mvn -pl xiaoxiao-jacoco-cli -o package  ->  target/xiaoxiao-jacoco-cli.jar（fat jar）
+        使用：java -jar xiaoxiao-jacoco-cli.jar report jacoco.exec --classfiles target/classes --html out
+    </description>
+
+    <dependencies>
+        <!-- JaCoCo core：exec 读取 / 合并 / 离线插桩 / 远程 dump -->
+        <dependency>
+            <groupId>org.jacoco</groupId>
+            <artifactId>org.jacoco.core</artifactId>
+        </dependency>
+        <!-- JaCoCo report：HTML / XML / CSV 报告 -->
+        <dependency>
+            <groupId>org.jacoco</groupId>
+            <artifactId>org.jacoco.report</artifactId>
+        </dependency>
+        <!-- ASM：execinfo / classinfo / 基线方法哈希用到 -->
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-tree</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>xiaoxiao-jacoco-cli</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/**</exclude>
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>**/module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <manifestEntries>
+                                        <Main-Class>peruser.cli.CommandLine</Main-Class>
+                                        <Implementation-Title>xiaoxiao-jacoco-cli</Implementation-Title>
+                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xiaoxiao</groupId>
+        <artifactId>xiaoxiao-jacoco</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>xiaoxiao-jacoco-agent</artifactId>
+    <packaging>jar</packaging>
+
+    <name>xiaoxiao-jacoco-agent</name>
+    <description>
+        xiaoxiao-jacoco agent：挂在目标 JVM 上做覆盖率采集。
+        支持 JaCoCo agent 的【全部】参数（destfile / append / includes / excludes / exclclassloader /
+        inclbootstrapclasses / inclnolocationclasses / sessionid / dumponexit / output /
+        address / port / classdumpdir / jmx），并扩展了按 key（用户 / 用例 / 请求头）分离的能力。
+
+        打包：mvn -pl xiaoxiao-jacoco-agent -o package  ->  target/xiaoxiao-jacoco-agent.jar（fat jar）
+        使用：java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,autokey=default -jar app.jar
+    </description>
+
+    <dependencies>
+        <!-- ASM：字节码插桩与 HttpServlet 钩子织入 -->
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+        </dependency>
+        <!-- JaCoCo core：探针插桩 + ExecutionData / exec 写出 + 远程协议 + AgentOptions 解析 -->
+        <dependency>
+            <groupId>org.jacoco</groupId>
+            <artifactId>org.jacoco.core</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>xiaoxiao-jacoco-agent</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!-- 打成 fat agent jar：把 asm + jacoco.core 全部并进去（不含 report/CLI） -->
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/**</exclude>
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>**/module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <manifestEntries>
+                                        <Premain-Class>peruser.PerUserAgent</Premain-Class>
+                                        <Agent-Class>peruser.PerUserAgent</Agent-Class>
+                                        <Can-Redefine-Classes>true</Can-Redefine-Classes>
+                                        <Can-Retransform-Classes>true</Can-Retransform-Classes>
+                                        <Implementation-Title>xiaoxiao-jacoco-agent</Implementation-Title>
+                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
