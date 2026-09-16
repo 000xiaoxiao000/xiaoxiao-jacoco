@@ -1,313 +1,613 @@
-# peruser-jacoco —— 单实例并发下按 key 分离的精准覆盖率（Java Agent）
+# xiaoxiao-jacoco —— 单实例并发下按 key 分离的精准覆盖率
 
-对任意「被插桩的目标系统」，在**单实例 + 多用户/多用例并发**执行时，把覆盖率按 **key**（用户 / 用例 / 请求 / 任务）
-干净分离，互不污染。基于 JaCoCo 0.8.15，但以 **ThreadLocal 探针** 替换其默认「全局静态字段探针」。
+对任意「被插桩的目标系统」，在**单实例 + 多用户/多用例并发**执行时，把覆盖率按 **key**
+（用户 / 用例 / 请求 / 任务）干净分离，互不污染。基于 JaCoCo 0.8.15，但以 **ThreadLocal 探针**
+替换其默认「全局静态字段探针」。
 
 > 为什么 JaCoCo 默认做不到：它的 `Instrumenter` 强制把探针存进静态字段 `$jacocoData`，所有线程共享，
 > 并发覆盖在全局数组合并。`sessionid` / `append` / `dump --reset` 都解决不了「单实例并发按 key 分离」。
 > 本方案绕过 `Instrumenter`，复刻其内部 `ClassProbesAdapter + ClassInstrumenter(IProbeArrayStrategy)` 流程，
-> 把探针数组改为 ThreadLocal，再按 key 在「工作单元结束」时合并。
+> 把探针数组改为「按 key 取、直写共享数组」，并让 key 能跟着异步调用链走（见 §2.6）。
 
-## 它是什么
-- `target/peruser-jacoco.jar`（Maven 构建产物，见下「构建」）：一个 **self-contained 的 javaagent**（已内含 asm 9.10.1 + jacoco core/report）。
-  目标 JVM 加 `-javaagent` 即可，零业务代码侵入。
-- `CoverageTracer`：公共 API，把一个「工作单元」的覆盖率归到某个 key。
-- `ReportCli`：独立工具，把 `.exec` + 原始 classfiles 渲染成**每个 key 一份** HTML 报告。
+工程由**两个可独立打包的模块**组成，**不含任何 HTTP 接口**：
 
-## Java 8+ 兼容（重要）
-agent 核心类以 `--release 8` 编译（class 文件版本 **52**），因此可挂接到 **Java 8 及以上**的目标 JVM——
-这正是默认 JaCoCo 方案在 Java 8 上直接 `-javaagent` 不会出现 `UnsupportedClassVersionError` 的前提。
-- ASM 9.10.1 / JaCoCo 0.8.15 的核心类本身也是 Java 5/8 字节码；jar 内仅 `module-info.class` 是 Java 9，
-  构建脚本已用 `unzip -x 'module-info.class'` 排除，不会带进 fat jar。
-- 若目标 JVM 是 Java 7 或更低，本 agent 不适用（JaCoCo 0.8.15 内部已要求 Java 8+ 的 API）。
-- 验证方式：构建用 `mvn clean package`（`maven-compiler-plugin` 已设 `release 8`）；本地用 JDK 1.8 实跑过 `-javaagent` 挂载 + 写 `.exec` + 官方 `jacococli report` 出带源码报告，
-  全部通过（见下「示例」与目录 `coverage/`）。
+| 模块 | 产物 | 用途 |
+|---|---|---|
+| `xiaoxiao-jacoco-agent` | `xiaoxiao-jacoco-agent.jar` | javaagent，挂到目标 JVM。支持**官方 JaCoCo agent 的全部参数** + 按 key 分离扩展 |
+| `xiaoxiao-jacoco-cli` | `xiaoxiao-jacoco-cli.jar` | 独立命令行工具。支持**官方 jacococli 的全部命令**：report / merge / dump / instrument / classinfo / execinfo / version |
 
-## 三步套用到你自己的目标系统
+---
 
-### 1. 给目标 JVM 挂 agent
+## 一、快速开始
+
+### 1. 构建
+
 ```bash
-java -javaagent:/abs/path/peruser-jacoco.jar=outdir=coverage \
-     -jar your-target-app.jar
-# 或已有启动脚本里加 -javaagent 参数即可
-```
-agent 参数（逗号分隔 `k=v`）：
-- `includes=com.foo:com.bar` —— 只插桩这些包前缀（`:` 分隔）；**留空 = 插桩所有非排除类**。
-- `excludes=com.foo.internal` —— 额外排除（`:` 分隔）。默认已排除 `peruser` / `org.jacoco` /
-  `org.objectweb.asm` / JDK，避免自插桩和递归。
-- `outdir=coverage` —— JVM 关闭时写出 `coverage-<key>.exec` 的目录。
-- `headerkey=NAME` —— 启用【按请求头归属】（零改目标系统、支持并发按用户/用例分离）：agent 在 Spring `DispatcherServlet.doDispatch`
-  入口读请求头 `NAME`（默认 `X-Coverage-Key`），非空则把**这一次请求**归属到该 key（线程级，A/B 并发互不串）；请求不带该头时回退全局 `CURRENT_KEY`。
-- `control=ADDR:PORT` —— 启用内嵌 HTTP 控制端点（见 §2）：`/key` 设全局 key、`/dump` 实时落盘、`/keys` 看当前 key、`/health` 健康检查。
+cd xiaoxiao-jacoco
+bash setup-m2.sh          # 首次（或换机器）把 lib/ 里的定制 asm + jacoco 装进 ~/.m2
+mvn clean package
 
-### 2. 用 CoverageTracer 包住「一个工作单元」
-只要在工作单元的开始/结束之间包一层，探针就归到对应 key。与具体触发方式无关
-（HTTP 请求、MQ 消费、定时任务、测试用例都行）：
+# 也可以只打其中一个模块
+mvn -pl xiaoxiao-jacoco-agent -o package
+mvn -pl xiaoxiao-jacoco-cli   -o package
+```
+
+产物：
+
+```
+xiaoxiao-jacoco-agent/target/xiaoxiao-jacoco-agent.jar   # fat jar，内含 asm + jacoco core
+xiaoxiao-jacoco-cli/target/xiaoxiao-jacoco-cli.jar       # fat jar，内含 asm + jacoco core + report，Main-Class 已配好
+```
+
+> ⚠️ **不要用 Maven Central 标准 `org.jacoco:org.jacoco.core:0.8.15` 替换**：本项目依赖的是定制版
+> （版本号带日期后缀 `.202606040825`），内部 API / 覆盖率格式可能不一致。必须先用 `setup-m2.sh` 装进本地 `.m2`。
+
+### 2. 挂 agent
+
+```bash
+java -javaagent:/abs/path/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.foo \
+     -jar your-target-app.jar
+```
+
+### 3. 归属 key（三选一，都不改业务逻辑也能用）
+
+**① `headerkey` —— 按 HTTP 请求头归属（推荐，零改代码、并发安全、框架无关）**
+
+```bash
+-javaagent:...=outdir=coverage,includes=com.foo,headerkey=X-Coverage-Key
+```
+
+agent 在 `HttpServlet.service` 入口织入钩子，读请求头 `X-Coverage-Key`，非空即把**这一次请求**归属到该 key
+（线程级，A/B 并发互不串）。不带该头时回退到 `CoverageTracer` 设置的 key 或 `autokey`。
+
+**② `autokey` —— 冒烟模式（零改代码，全进程合并成一个 key）**
+
+```bash
+-javaagent:...=outdir=coverage,autokey=smoke,includes=com.foo
+```
+
+**③ `CoverageTracer` —— 代码里包一层（最细粒度）**
 
 ```java
 import peruser.CoverageTracer;
 
-// 推荐 try-with-resources（自动 begin/end）
 try (CoverageTracer t = CoverageTracer.start("case-login-error")) {
-    targetSystem.doWork();          // 这里执行的被插桩类，探针落在该线程 ThreadLocal
+    targetSystem.doWork();          // 这里执行的被插桩类（含它派生的异步任务），探针都归到该 key
 }
-
 // 等价显式写法
 CoverageTracer.begin("user-A");
 try { targetSystem.doWork(); } finally { CoverageTracer.end(); }
 ```
-- `start(key)` / `begin(key)` 只设一个线程级 key；`end()` / `close()` 把本线程探针按 key 合并并清空
-  （线程池复用也安全，因为每次 work unit 结束都清空）。
-- 多个并发 work unit 落在不同线程 → 探针天然按线程隔离；结束后各归各的 key。
 
-### 3. 生成每个 key 的独立报告
-JVM 关闭后会自动写出 `coverage/coverage-<key>.exec`。再跑：
+`start/begin` 设的是**线程局部** key（存在 `InheritableThreadLocal` 里，异步子线程也能拿到，见 §2.6），
+探针**直写该 key 的共享数组**，所以异步任务里即使不调 `end()` 也不会丢数据；
+`end/close` 只是退出该 key 的归属区间（线程池复用安全）。
+
+### 4. 出报告
+
 ```bash
-java -cp peruser-jacoco.jar peruser.ReportCli \
+java -jar xiaoxiao-jacoco-cli.jar report \
      --execdir coverage \
-     --classes /path/to/your/target/classes \   # 必须是【原始未插桩】的字节
-     --classes /path/to/some-lib.jar \           # 也可传 jar
-     --sources /path/to/your/src/main/java \   # 可选；传了才能在报告里渲染源码
-     --out reports
+     --classfiles /path/to/target/classes \     # 必须是【原始未插桩】的字节，可重复传，也可是 jar
+     --sourcefiles /path/to/src/main/java \     # 可选，传了才能在报告里渲染源码
+     --html reports
 ```
-报告生成在 `reports/<key>/index.html`。**注意**：`--classes` 要传**原始（磁盘上未插桩）**的 class 文件，
-用来做行/分支映射；agent 在内存里改的是运行时的类，磁盘 class 不动。
 
-### 3.1 跨构建增量：保留未改接口的覆盖率（方法级携带）
-默认 `merge-on-dump` 按 `classId` 合并，**只能在「类的字节码没变」时**跨构建保留覆盖。
-若两个接口在同一个类里、其中一个被改（如 `Web3Controller` 的 `/login` 与 `/query`，改了 `/query`），
-整个类重编译、`classId` 变了 → 旧 build 里 `/login` 的探针在新 build 报告里被静默丢弃。
+`reports/<key>/index.html` 每个 key 一份，格式与官方 `jacococli report` 完全一致。
+加 `--merge` 额外出一份全员并集 `reports/all/index.html`。
 
-解决：用**方法级 hash 携带**（不依赖 git），并在**探针层**做增量注入，使最终报告是
-**与官方 `jacococli report` 完全一致的标准 JaCoCo 报告**（含 `jacoco-resources`、包目录树、源码视图），
-而不是自绘 HTML。思路：
-1. Build N 跑完后，采基线：每个方法的源码 hash（`MethodHasher`，排除行号等调试属性）映射到「哪些行被覆盖」。
-2. Build N+1 跑部分接口后，离线用 JaCoCo 插桩原始 class + ASM 扫描出「方法→探针→行」映射，
-   对 `className#methodHash` 命中的方法，按**相对行偏移**把基线覆盖行的探针置 `true`，
-   再喂回 JaCoCo 原生 `HTMLFormatter` → 未改方法（如 `/login`）的覆盖显示为绿色 `covered`，
-   改过的方法（如 `/query`）只用本次真实执行。
+---
+
+## 二、agent 参数（= 官方全部参数 + 按 key 扩展）
+
+参数是逗号分隔的 `k=v`，值可用双引号包裹（内含 `,`/`=` 也安全，与官方一致）。
+
+### 2.1 官方 JaCoCo agent 参数（语义与官方完全一致）
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `destfile=<path>` | exec 输出文件 | `jacoco.exec` |
+| `append=true\|false` | 是否向已存在的 exec 追加（true 时按 classId **OR 合并**，不覆盖历史） | `true` |
+| `includes=<pattern>` | 仅插桩匹配的类，`*` `?` 通配符，`:` 分隔多项。**全匹配**（JaCoCo `WildcardMatcher` 用 `Pattern.matches`），**不是前缀匹配** —— 见下方 ⚠️ | `*` |
+| `excludes=<pattern>` | 不插桩匹配的类，`:` 分隔多项 | 空 |
+| `exclclassloader=<pattern>` | 跳过匹配的类加载器（`exclclassloaders` 亦可） | 空 |
+| `inclbootstrapclasses=true\|false` | 是否插桩 bootstrap 类加载器加载的类 | `false` |
+| `inclnolocationclasses=true\|false` | 是否插桩没有 source location 的类 | `false` |
+| `sessionid=<id>` | session 标识 | 自动生成 |
+| `dumponexit=true\|false` | JVM 关闭时是否 dump | `true` |
+| `output=file\|tcpserver\|tcpclient\|none` | 输出方式 | `file` |
+| `address=<host/ip>` | tcpserver 监听地址 / tcpclient 目标地址 | 回环地址 |
+| `port=<port>` | tcpserver 监听端口 / tcpclient 目标端口 | `6300` |
+| `classdumpdir=<path>` | 插桩前把**原始未插桩** class 字节落盘到该目录 | 不落盘 |
+| `jmx=true\|false` | 注册 `org.jacoco:type=Runtime` MBean，支持运行时 dump/reset | `false` |
+
+未知参数**只打印告警不致命**（官方会对未知 key 直接 FATAL）。
+
+> ⚠️ **头号坑：`includes` 是全匹配，不是前缀匹配。**
+> JaCoCo 的 `WildcardMatcher` 用 `Pattern.matcher(s).matches()`，所以每个匹配项必须覆盖**整个** VM 类名
+> （`com/foo/Bar` 这种斜杠形式）。因此：
+>
+> | 写法 | 实际效果 |
+> |---|---|
+> | `includes=web3Server` | ❌ 只匹配「类名**恰好**等于 `web3Server`」的类 → 几乎必然 **0 个类插桩、覆盖率全空** |
+> | `includes=web3Server*` | 只匹配类名以 `web3Server` **开头**的（仅当它位于包名开头） |
+> | `includes=*web3Server*` | ✅ 类名任意位置包含 `web3Server` |
+> | `includes=com.jettofocus.web3.*` | ✅ 该包及其子包下所有类（推荐） |
+>
+> `includes` 匹配的是 **VM 类名**，不是 URL 路径（`/web301/testWeb3`）、不是模块名、不是包名简写。
+> 写错时 agent 启动日志会直接点名并给出改法；拿不准就先 `includes=*` 跑通，再看 §3.3.1 的自检输出。
+
+### 2.2 xiaoxiao-jacoco 扩展参数（按 key 分离）
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `outdir=DIR` | 按 key 输出 exec 的目录 | `coverage` |
+| `autokey=KEY` | 冒烟模式：所有线程合并进单一 KEY | 不启用 |
+| `headerkey=NAME` | 按 HTTP 请求头 NAME 归属 | 不启用 |
+| `async=true\|false` | 异步（线程池 / @Async / CompletableFuture）key 传递，见 §2.6 | `true` |
+| `cleanup=24h` | 定期清理 outdir 下的旧 exec/class（`30m` / `2h` / `1d`，纯数字按小时） | 不启用 |
+| `debug=true` | 打印被插桩的类名与每次请求归属明细（排障用，默认只打前 3 次归属） | `false` |
+
+### 2.3 exec 文件名规则
+
+- 未指定 `destfile`：`coverage/coverage-<key>.exec`
+- 指定 `destfile`：`<destfile 目录>/<destfile 前缀>-<key>.exec`
+- `autokey` 单 key 模式：直接写 `destfile` 本身（与官方完全一致）
+
+### 2.4 output 四种模式
+
+> `output=` 是**输出通道**，取值只有 `file` / `tcpserver` / `tcpclient` / `none` 四个，
+> **不是 IP 地址**。IP 和端口请分别用 `address=` 和 `port=` 指定（写错会给出明确报错，不会静默失败）。
+
+- **`file`**（默认）：JVM 退出（或 JMX dump）时按 key 写 `outdir/<prefix>-<key>.exec`。
+- **`tcpserver`**：agent 在 `address:port` 上**监听**，等外部来抓，**协议与官方完全一致**，
+  `jacococli dump` 与 `xiaoxiao-jacoco-cli dump` 都能直接抓。
+  - **必须显式指定 `address`**：留空只绑 `127.0.0.1`，其它机器连不上（会 `Connection refused`）。
+    跨机请写 `address=<被测机对外IP>` 或 `address=0.0.0.0`。
+  - TCP 通道里是**所有 key 的并集**；但 JVM 退出 / JMX dump 时**照样会**把按 key 分离的
+    `outdir/<prefix>-<key>.exec` 落盘，两条路都走。
+  - 客户端不发命令时（如 `nc`）等待 5s 后照样回一次 dump。
+- **`tcpclient`**：agent 启动即连上 `address:port`（`address` 填**采集端** IP），
+  JVM 退出时把并集 exec 流推过去；同样也会把按 key 的 exec 落到 outdir。
+  - 本工程不再自带采集端服务，需要你自己在 `address:port` 上起一个按 exec 协议读取的监听端。
+- **`none`**：不主动输出，也不写文件，只能靠 JMX 触发。
+
+### 2.4.1 跨机怎么选 tcpserver / tcpclient
+
+| | `tcpserver` | `tcpclient` |
+|---|---|---|
+| 连接方向 | 你的电脑 → 被测机（**出方向**） | 被测机 → 你的电脑（**入方向**） |
+| `address` 填 | **被测机**的 IP | **采集端**的 IP |
+| 前提 | 被测机 `port` 对你可达（防火墙/安全组放行） | 被测机能访问到你的电脑（跨网段/NAT 通常不通） |
+
+**绝大多数情况选 `tcpserver`**：被测机在机房/云上，你的电脑能连过去，反过来一般连不通。
+
+### 2.5 JMX
+
+```bash
+-javaagent:...=outdir=coverage,jmx=true
+```
+
+MBean 对象名 `org.jacoco:type=Runtime`，方法：`dump()` / `reset()` / `getVersion()` /
+`getSessionId()` / `setSessionId()`。可用 `jconsole` / `jmxterm` / 代码调用。
+
+### 2.6 异步归属：线程池 / @Async / CompletableFuture 不丢 key（默认开启）
+
+key 原本存在 ThreadLocal 里，异步子线程拿不到 —— 覆盖要么丢失、要么记到别的 key 上（串号）。
+开启后（默认 `async=true`）：
+
+| 异步形式 | 传递方式 |
+|---|---|
+| `new Thread()` | key 存在 `InheritableThreadLocal`，子线程创建时自动继承 |
+| 线程池（`Executors.*`、`ThreadPoolTaskExecutor`、Tomcat 工作线程…） | 织入 JDK 提交入口，**提交时捕获 key、执行时设置、结束回退** |
+| `CompletableFuture.runAsync/supplyAsync` | 同上（走 `ForkJoinPool` 提交入口） |
+| `@Async` | 同上（Spring 最终也是提交给某个 Executor） |
+| `ScheduledExecutorService.schedule` | 同上（一次性任务；周期性任务不织入，它不属于单次请求） |
+
+织入的 JDK 入口：`ThreadPoolExecutor.execute`、`AbstractExecutorService.submit`×3、
+`ForkJoinPool.execute/submit`、`ScheduledThreadPoolExecutor.schedule`×2。
+注入的等价代码只有一行：`task = peruserrt.KeyBridge.wrap(task);`
+（当前线程没有 key 时 `wrap` 原样返回，零开销）。
+
+另外探针现在**直写该 key 的共享数组**，不再依赖「线程局部副本 + `end()` 合并」，
+所以异步任务里即使没人调 `end()`，数据也已经落在正确的 key 下。
+
+```bash
+# 默认就是开启的；显式关闭（比如目标 JVM 不允许重定义 JDK 类时）
+-javaagent:...=outdir=coverage,async=false
+```
+
+自研线程池（任务先进自己的队列、再由别的线程取出执行，绕开了 JDK 提交入口）可手动包一层：
+
+```java
+executor.execute(CoverageTracer.wrap(myTask));   // Runnable
+executor.submit(CoverageTracer.wrap(myCallable)); // Callable
+```
+
+关闭后实测影响：线程池 / CompletableFuture 里的覆盖**全部丢失**（`async=false` 对照组结果为 0）。
+
+---
+
+## 三、cli 命令（= 官方 jacococli 全部命令）
+
+```bash
+java -jar xiaoxiao-jacoco-cli.jar <command> [options]
+```
+
+### 3.1 `report` —— 出报告
+
+```bash
+report [<execfiles> ...] --classfiles <path> [--classfiles <path> ...] \
+       [--sourcefiles <path> ...] --html <dir> [--xml <file>] [--csv <file>] \
+       [--encoding <enc>] [--name <name>] [--tabwidth <n>] [--quiet]
+```
+
+官方参数：`--classfiles` / `--sourcefiles` / `--html` / `--xml` / `--csv` / `--encoding` /
+`--name` / `--tabwidth` / `--quiet`，语义与官方一致。
+
+扩展参数（按 key 分离场景用）：
+
+| 参数 | 说明 |
+|---|---|
+| `--execdir <dir>` | 读该目录下所有 `*.exec`，按文件名里的 `<key>` 逐个出报告 |
+| `--perkey` | 显式按 key 拆分（默认在 execdir 模式下自动开启） |
+| `--merge` | 额外出一份所有 key 的并集报告 `all/` |
+| `--baseline-out <json>` | 采集方法级基线（跨构建增量用，见 §5） |
+| `--baseline <json>` | 用基线做「方法级携带」，生成增量对比报告 |
+
+兼容旧写法：不带命令名、直接以 `--execdir` 开头时等价于 `report`。
+
+### 3.2 `merge` —— 合并多个 exec
+
+```bash
+merge [<execfiles> ...] --destfile <path> [--append true|false]
+```
+
+按 classId **OR 合并**（不是覆盖）。
+
+### 3.3 `dump` —— 从运行中的 agent 抓 exec
+
+```bash
+dump [--address <addr>] [--port <port>] [--destfile <path>] [--reset] [--retry <n>] [--quiet]
+     [--key <k>]...        # 扩展：只抓某个 key，可重复或逗号分隔
+```
+
+**输出文件**：写到 `--destfile`（默认 `./jacoco.exec`）；多 key 时拆成 `<path 去 .exec>-<key>.exec`。
+父目录不存在会**自动创建**；文件名不以 `.exec` 结尾会**自动补上**。
+
+```bash
+dump --address 172.16.11.13 --port 6300 --key 1 --destfile coverage/coverage-1.exec
+dump --address 172.16.11.13 --port 6300 --key 2 --destfile coverage/coverage-2.exec
+```
+
+走官方二进制 TCP 协议，与 `jacococli dump` 互通。已存在同名 destfile 时按官方追加语义 OR 合并进去。
+
+> 注意：`nc` 直连 tcpserver 抓到的是**裸协议流**，末尾多一个 `CMDOK(0x20)` 块，不是合法 exec 文件。
+> 请用 `dump` 命令抓取（客户端会把该块剥离后再落盘）。
+
+#### 按 key 抓取（`--key`，xiaoxiao-jacoco 专有）
+
+不带 `--key` 时是**官方语义**：只能拿到「所有 key 的并集」，无法区分哪个覆盖来自哪个请求。
+带 `--key` 时走私有扩展块，只拿该 key 的数据：
+
+```bash
+# 一次抓 1 和 2 两个 key，分别落盘
+dump --address 172.16.11.13 --port 6300 --key 1,2 --destfile dumped.exec
+#   -> dumped-1.exec   dumped-2.exec
+
+# 只抓一个 key：直接写 --destfile
+dump --address 172.16.11.13 --port 6300 --key 1 --destfile cov-1.exec
+
+# 抓完顺便清掉该 key 的内存累计（不影响其它 key）
+dump --address 172.16.11.13 --port 6300 --key 1 --reset --destfile cov-1.exec
+```
+
+多 key 时是**覆盖写**（文件即该 key 的完整数据），不与旧文件 OR 合并，保证各 key 严格分离。
+`--reset` 只清指定 key，其它 key 不受影响。
+
+> 该扩展块只有 `xiaoxiao-jacoco-agent` 认识；对官方 agent 请勿使用 `--key`。
+> 不带 `--key` 时发的仍是官方块，官方 `jacococli dump` 可正常抓取。
+
+### 3.3.1 `keys` —— 列出 agent 当前已采集的 key
+
+```bash
+keys [--address <addr>] [--port <port>] [--retry <n>] [--quiet]
+```
+
+输出 `headerkey` 抓到的所有取值（即 `X-Coverage-Key` 出现过的值），一行一个。
+不知道有哪些 key 时先跑它，再把结果喂给 `dump --key`。
+
+```bash
+keys --address 172.16.11.13 --port 6300
+# 1
+# 2
+dump --address 172.16.11.13 --port 6300 --key 1,2 --destfile dumped.exec
+```
+
+**它同时是「覆盖率为什么是空的」第一诊断入口**：除了 key 列表，还会回传 agent 端的自检计数
+（`classes instrumented` / `requests hooked` / `tagged`），没有 key 时直接给出最可能的原因和
+可直接抄的 `includes`。`dump --key K` 抓到 0 个类时也会自动拉一次这些数字。
+
+```bash
+keys --address 172.16.11.13 --port 6300
+# [xiaoxiao-jacoco-cli] no key collected yet on 172.16.11.13:6300
+#   ! agent 到目前为止【一个类都没有插桩】(classes instrumented=0)
+#     -> 根因：includes/excludes 没匹配上。includes 匹配的是【VM 类名】(com/foo/Bar)，
+#        不是 URL 路径（/web301/testWeb3）、不是模块名（web3Server）、不是包名简写。
+#     -> 该进程里已加载的类，包名样例：[com/jettofocus/web3/*]
+#        建议把 agent 参数改成 includes=com/jettofocus/web3/*
+#     -> 改完必须重启被测应用才生效。
+```
+
+判读方式：
+
+| 自检数字 | 含义 | 该做什么 |
+|---|---|---|
+| `instrumented=0` | 一个类都没插桩 | 改 `includes`（VM 类名），或加 `inclnolocationclasses=true`（Spring Boot 可执行 jar 常见）；改完重启 |
+| `instrumented>0`、`hooked=0` | 请求没进 `HttpServlet.service`（如 WebFlux/Netty 非 Servlet 栈） | 改用 `CoverageTracer` 埋点，或在入口 Filter 里 `begin(key)` |
+| `hooked>0`、`tagged=0` | HTTP 入口进来了，但请求头没读到 | 核对 `headerkey=` 的头名、请求是否真的带了该 header |
+| `tagged>0` 但仍抓不到 | key 字符串不一致（空格/大小写） | `keys` 列出的值才是 `dump --key` 该填的值 |
+
+### 3.3.2 `stats` —— 插桩了什么、插了多少、各 key 采到多少（排障首选）
+
+`keys` 只在「没数据」时才提示；想知道**插桩是否成功、插了哪些类、每个 key 各有多少覆盖**，
+随时跑 `stats`，无需等自检、无需 dump：
+
+```bash
+java -jar xiaoxiao-jacoco-cli.jar stats --address 172.16.11.13 --port 6300
+# --limit <n>  最多列多少个类名，默认 50；--limit 0 列全部
+```
+
+正常时输出：
+
+```
+插桩情况
+  transformer 看到的类        171
+  已插桩的类                  5
+  无 source location 被跳过   0
+
+请求归属
+  HTTP 入口钩子触发次数       3
+  成功读到 key 的次数         3
+
+各 key 采集到的覆盖
+  key                     classes  probes   covered  覆盖率
+  1                       3        17       9        52.9%
+  2                       4        18       17       94.4%
+
+已插桩的类（共 5 个）
+  demo/App
+  demo/Controller
+  ...
+```
+
+`已插桩的类 = 0` 时会直接给出诊断（includes 全匹配说明 + 该进程真实包名样例 + 可照抄的 `includes=`）：
+
+```
+诊断：一个类都没插桩（最常见原因是 includes 没匹配上）
+  -> includes 匹配的是【VM 类名】(com/foo/Bar)，是全匹配（不是前缀匹配）；不是 URL 路径、不是模块名、不是包名简写
+  -> 该进程里已加载的类，包名样例：[demo/*]
+     建议改成 includes=demo/*（或先 includes=* 验证链路，再收窄）
+  -> 被 includes 过滤掉的类样例：[demo/App, demo/Controller, ...]
+```
+
+> `stats` 是 xiaoxiao-jacoco 私有块（0x43/0x22）。旧版 agent 不认识会退化成一次普通 dump，
+> 命令会提示「不支持 stats，请升级 agent」。
+
+### 3.4 `instrument` —— 离线插桩
+
+```bash
+instrument [<sourcefiles> ...] --dest <dir>
+```
+
+### 3.5 `classinfo` —— 查看类的探针布局
+
+```bash
+classinfo [<classlocations> ...] [--verbose]
+```
+
+### 3.6 `execinfo` —— 查看 exec 内容
+
+```bash
+execinfo [<execfiles> ...] [--verbose] [--quiet] [--execdir <dir>]
+```
+
+输出 sessions / classes / probes。
+
+### 3.7 `version` / `help`
+
+---
+
+## 四、典型用法组合
+
+### 4.1 按用户 / 按用例分离（headerkey，零改目标系统、真正支持并发）
+
+```bash
+java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.foo,headerkey=X-Coverage-Key \
+     -jar your-app.jar
+```
+
+```bash
+# 用户 A
+curl -H "X-Coverage-Key: user-A" http://host/api/xxx
+# 用户 B（可与 A 并发）
+curl -H "X-Coverage-Key: user-B" http://host/api/xxx
+
+# 跑完一次 dump，两个 key 各出一份（合并写：中途再 dump 也不会覆盖，只会累加）
+java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage \
+     --classfiles /path/to/classes --sourcefiles /path/to/src --html reports
+# -> reports/user-A/index.html   reports/user-B/index.html
+```
+
+### 4.2 长跑服务：tcpserver + 跨机抓取（本机 192.168.6.130 ← 被测机 172.16.11.13）
+
+被测机上（**`address` 必须填被测机自己的 IP**，否则只绑回环，你连不上）：
+
+```bash
+# includes 必须写【VM 类名】通配，写成 web3Server（模块名/URL 片段）会一个类都匹配不到
+java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.jettofocus.*,inclnolocationclasses=true,output=tcpserver,address=172.16.11.13,port=6300,headerkey=X-Coverage-Key \
+     -jar web3-1.0-SNAPSHOT.jar
+```
+
+> 拿不准包名就先 `includes=*` 起一次，`keys` 命令会把该进程里已加载类的包名样例和建议的
+> `includes` 直接打出来，照抄即可（§3.3.1）。Spring Boot 可执行 jar 建议常带
+> `inclnolocationclasses=true`。
+
+你的电脑上：
+
+**不带 `--key`（官方语义，拿到所有 key 的并集）**：
+
+```bash
+java -jar xiaoxiao-jacoco-cli.jar dump --address 172.16.11.13 --port 6300 --destfile coverage/dumped.exec
+java -jar xiaoxiao-jacoco-cli.jar report --exec coverage/dumped.exec --classfiles /path/to/classes --html reports
+```
+
+**按 key 分别抓（推荐，多用户场景）**：
+
+```bash
+# 先看有哪些 key
+java -jar xiaoxiao-jacoco-cli.jar keys --address 172.16.11.13 --port 6300
+
+# 一次抓 1 和 2，分别落盘 dumped-1.exec / dumped-2.exec
+java -jar xiaoxiao-jacoco-cli.jar dump --address 172.16.11.13 --port 6300 --key 1,2 \
+     --destfile coverage/dumped.exec
+
+# 各自出报告
+java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --classfiles /path/to/classes \
+     --sourcefiles /path/to/src --html reports
+```
+
+另外被测机 JVM 退出时还会把按 key 分离的 `coverage/coverage-<key>.exec` 落盘，
+把它 scp 回来用 `--execdir` 同样能出每个 key 各一份报告。
+
+### 4.3 长跑服务：JMX 触发
+
+```bash
+java -javaagent:...=outdir=coverage,includes=com.foo,jmx=true -jar your-app.jar
+# jconsole 连上 -> org.jacoco:type=Runtime -> dump()
+```
+
+### 4.4 冒烟验证（先确认探针能挂上）
+
+```bash
+java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,autokey=smoke,includes=com.foo -jar your-app.jar
+java -jar xiaoxiao-jacoco-cli.jar execinfo --execdir coverage     # 有探针数据说明挂上了
+```
+
+---
+
+## 五、跨构建增量：保留未改接口的覆盖率（方法级携带）
+
+默认按 `classId` 合并，**只能在「类的字节码没变」时**跨构建保留覆盖。若两个接口在同一个类里、
+其中一个被改（如 `Web3Controller` 的 `/login` 与 `/query`，改了 `/query`），整个类重编译、
+`classId` 变了 → 旧 build 里 `/login` 的探针在新 build 报告里被静默丢弃。
+
+解决：用**方法级 hash 携带**（不依赖 git），并在**探针层**做增量注入，最终报告仍是
+**与官方 `jacococli report` 完全一致的标准 JaCoCo 报告**。
 
 ```bash
 # 第 1 步：Build 0001 跑完，采集基线（JSON）
-java -cp peruser-jacoco.jar peruser.ReportCli \
-     --execdir coverage --classes /path/to/build1-classes \
-     --baseline-out baseline-0001.json
+java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage \
+     --classfiles /path/to/build1-classes --baseline-out baseline-0001.json
 
 # 第 2 步：Build 0002 部署后只跑了部分接口，生成「携带合并」标准报告
-java -cp peruser-jacoco.jar peruser.ReportCli \
-     --execdir coverage --classes /path/to/build2-classes --sources /path/to/build2-src \
-     --baseline baseline-0001.json --out reports
-```
-报告在 `reports/<key>/index.html`，即与官方一致的标准 JaCoCo 报告（`<key>` 来自 `coverage-<key>.exec`，
-如 `X-Coverage-Key: 1` → `reports/1/index.html`）。携带的行就是普通绿色 covered，总数也包含历史覆盖。
-只携带 build N **真实覆盖**的行，不会伪造覆盖。
-
-> 实现要点：内置定制版 JaCoCo 用「`$jacocoData` 常量动态 + 局部变量」持有探针数组，探针存储指令为
-> `aload <var>; 探针id; iconst_1; bastore`，注入逻辑据此解析（与官方 `jacococli` 行为对齐）。
-> 基线按 `className#methodHash` 索引，**同一类内**方法体未变才携带，避免不同类里同体方法
-> （`toString`/`equals`/getter、空构造等）因 methodHash 碰撞而跨类误携带。
-
-## 构建（自己重新生成 peruser-jacoco.jar）
-工程现在用 **Maven**（`pom.xml`）构建，产物是 self-contained fat agent（内嵌 asm+jacoco、带 Premain-Class/Agent-Class 清单），目标 JVM 零依赖接入。
-你改完 `src/peruser/*.java` 后，一条命令即可重出 agent jar：
-
-```bash
-cd peruser-jacoco
-mvn clean package            # 产物在 target/peruser-jacoco.jar
+java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage \
+     --classfiles /path/to/build2-classes --sourcefiles /path/to/build2-src \
+     --baseline baseline-0001.json --html reports
 ```
 
-- 目标字节码固定为 **Java 8（major version 52）**：`pom.xml` 里 `maven.compiler.release=8`，
-  即使本机 Maven 跑在 JDK 21，产物仍是 Java 8 字节码，可在 Java 8+ 目标 JVM（如 web3）挂载。
-- 依赖（asm 9.10.1 + jacoco core/report）的定制版已放在 `lib/`，并通过 `setup-m2.sh` 装进本地 `~/.m2`；
-  **换机器首次构建前先跑一次** `bash setup-m2.sh`（见下）。无需联网拉标准 Central 版本。
-- 首次构建（或换机器）需要本地 `.m2` 里有定制版 jacoco，否则 Maven 找不到 `org.jacoco:org.jacoco.core:0.8.15.202606040825`：
+思路：
+1. Build N 跑完采基线：每个方法的源码 hash（`MethodHasher`，排除行号等调试属性）映射到「哪些行被覆盖」。
+2. Build N+1 跑部分接口后，离线用 JaCoCo 插桩原始 class + ASM 扫描出「方法→探针→行」映射，
+   对 `className#methodHash` 命中的方法，按**相对行偏移**把基线覆盖行的探针置 `true`，
+   再喂回 JaCoCo 原生 `HTMLFormatter` → 未改方法的覆盖显示为绿色 `covered`。
 
-```bash
-bash setup-m2.sh             # 把 lib/ 里的定制 asm + jacoco 装进 ~/.m2（仅一次）
-mvn clean package
+只携带 build N **真实覆盖**的行，不会伪造覆盖。基线按 `className#methodHash` 索引，
+**同一类内**方法体未变才携带，避免不同类里同体方法（`toString`/`equals`/getter、空构造等）
+因 methodHash 碰撞而跨类误携带。
+
+---
+
+## 六、目录
+
+```
+xiaoxiao-jacoco/
+  pom.xml                         # parent，packaging=pom，管理依赖与插件版本
+  setup-m2.sh                     # 首次构建前把 lib/ 里的定制 jacoco/asm 装进 ~/.m2
+  lib/                            # asm 9.10.1 + jacoco core/report 定制版
+  xiaoxiao-jacoco-agent/
+    pom.xml                       # 依赖 asm + org.jacoco.core（不含 report），shade 成 fat agent
+    src/main/java/peruser/
+      PerUserAgent.java           # premain/agentmain 入口
+      Options.java                # 官方全部参数 + 扩展参数解析
+      AgentArgParser.java         # 支持双引号包裹的 k=v 解析
+      PerUserTransformer.java     # ClassFileTransformer：过滤 + 织入
+      InstrumenterFlow.java       # 复刻 JaCoCo 内部插桩流程
+      ThreadLocalProbeArrayStrategy.java / ThreadProbeStore.java
+      CoverageTracer.java         # 公共 API：begin/end 一个工作单元
+      RequestKeyHook.java / RequestKeyWeaver.java   # headerkey 请求头归属
+      CoverageStore.java          # 按 key 的 exec 读写/合并
+      IAgentOutput.java + FileOutput / NoneOutput / TcpServerOutput / TcpClientOutput / Outputs
+      JmxSupport.java / JacocoRuntime.java / JacocoRuntimeMBean.java
+  xiaoxiao-jacoco-cli/
+    pom.xml                       # 依赖 core + report + asm，Main-Class=peruser.cli.CommandLine
+    src/main/java/peruser/cli/
+      CommandLine.java            # 命令分发
+      CliArgs.java / CliUsageException.java
+      ReportCommand.java / MergeCommand.java / DumpCommand.java
+      InstrumentCommand.java / ClassInfoCommand.java / ExecInfoCommand.java / VersionCommand.java
+      AnalyzePaths.java           # exec/class/source 路径扫描
+      BaselineStore.java / BaselineReport.java / MethodHasher.java / MiniJson.java
 ```
 
-> ⚠️ **不要用 Maven Central 标准 `org.jacoco:org.jacoco.core:0.8.15` 替换**：那是另一份字节码，
-> 与本项目依赖的定制版（版本号带日期后缀 `.202606040825`）内部 API / 覆盖率格式可能不一致，会导致编译或运行时异常。
-> 日常构建请用上面的 `mvn` 命令；不要替换为 Maven Central 标准版。
+---
 
-## 目录
-```
-peruser-jacoco/
-  pom.xml                    # Maven 构建（fat agent，Java 8）
-  setup-m2.sh                # 首次构建前把 lib/ 里的定制 jacoco/asm 装进本地 ~/.m2
-  target/peruser-jacoco.jar  # 产物：self-contained agent（asm+jacoco 已内嵌）
-  lib/                        # asm 9.10.1 + jacoco core/report 定制版（agent 运行时依赖，已内嵌进 fat jar）
-  integration/                # 参考模板（不被编译；本「control 端点」方案不要求使用）：
-                              #   Web3CoverageInterceptor.java / Web3CoverageConfig.java（Spring 拦截器，反射调 CoverageTracer）
-  src/peruser/                # 核心：InstrumenterFlow / ThreadLocalProbeArrayStrategy /
-                              #   ThreadProbeStore / CoverageTracer / CoverageStore /
-                              #   PerUserTransformer / PerUserAgent / ReportCli / Options /
-                              #   RequestKeyHook（请求头钩子）/ RequestKeyWeaver（Servlet 统一入口 service 字节码织入，框架无关）
-  README.md
-```
+## 七、适用与限制
 
-## 适用与限制
-- 适用：单实例、并发、需要按 key 切分覆盖率的精准测试 / 灰度比对 / 多租户隔离验证等。
-- **目标 JVM 需 Java 8+**（agent 以 Java 8 字节码编译，已在 JDK 1.8 上验证可挂载）。若目标报
-  `UnsupportedClassVersionError: peruser/... has been compiled by a more recent version`，说明用的是旧版
-  agent，重新 `mvn clean package` 即可（`maven-compiler-plugin` 已强制 `release 8`）。
-  能用「双实例双 agent」时优先官方方案（更简单、零改造）。
+- **目标 JVM 需 Java 8+**（两个模块都以 `--release 8` 编译，class major version 52，已在 JDK 1.8 验证可挂载）。
+  若目标报 `UnsupportedClassVersionError`，说明用的是旧版 jar，重新 `mvn clean package` 即可。
+- 能用「双实例双 agent」时优先官方方案（更简单、零改造）。
 - 依赖 JaCoCo 0.8.15 内部包（`org.jacoco.core.internal.*`），随版本可能变动，升级需回归验证。
-- 类加载隔离：被插桩类在运行时需能看见 `peruser.ThreadProbeStore`（agent jar 由 `-javaagent` 机制加在**系统 classpath**，
-  大多数应用 OK）。**agent 故意不调用 `appendToBootstrapClassLoaderSearch`**：被插桩的应用类（系统 / 应用类加载器，
-  均向上委派到系统类加载器）解析 `peruser.*` 时，与 `ControlServer` / `CoverageStore` / `PerUserAgent` 用的是**同一份**
-  `ThreadProbeStore` 实例——这样 `/key` 设的 key、`/dump` 读到的 store 才是同一份。一旦误加 bootstrap 搜索，bootstrap 里
-  会再存在一份 `ThreadProbeStore`，应用类向上委派命中 bootstrap 副本，而控制端点用的是系统 classpath 副本，两份静态字段
-  互不连通 → 探针写进一份、读出另一份 → 覆盖率全空（5 字节空 `.exec`）。我们只插桩应用类（JDK 类已在 excludes 里排除），
-  不需要 bootstrap 可见，因此保持「仅系统 classpath」最稳。若目标用隔离类加载器（部分插件框架）导致应用类看不到
-  `peruser.*`，再另行把 agent jar 暴露给该加载器。
-- asm 冲突：agent 内嵌 asm 9.10.1。若目标应用自带**不同** asm 版本且在同一 classpath，可能冲突；
-  此时把目标应用的 asm 也对齐到 9.10.1，或改用 `Class-Path` 方式加载 agent 依赖。
-- 性能：每个被插桩类每次方法调用多一次 `ThreadProbeStore.getProbes`（含一次 `ConcurrentHashMap.putIfAbsent`），
-  高频路径有轻微开销；可用 `includes=` 限定只插桩关心的包来降低。
+- **异步（线程池 / @Async / CompletableFuture）**：`async=true`（默认）已覆盖 JDK 标准提交入口，
+  见 §2.6。仍不支持的是**并行流** `parallelStream`（走 `ForkJoinTask.fork`，不经过提交入口）
+  与**跨进程 / 跨线程队列转交**（MQ 消费者、任务落库再由别的线程捞起）—— 这类需要业务侧
+  在消费端重新 `CoverageTracer.begin(key)`。
+- **类加载隔离**：被插桩类在运行时需能看见 `peruser.ThreadProbeStore`（agent jar 由 `-javaagent`
+  机制加在**系统 classpath**，大多数应用 OK）。agent **只对 `peruserrt` 这个小包**调用
+  `appendToBootstrapClassLoaderSearch`（用于给 JDK 线程池织入 key 传递，该包自包含、无状态，
+  注入前后都只有一份）。但 `peruser.*` **故意不加** bootstrap 搜索：
+  被插桩的应用类（系统 / 应用类加载器，均向上委派到系统类加载器）解析 `peruser.*` 时，与 agent 用的是
+  **同一份** `ThreadProbeStore` 实例。一旦误加 bootstrap 搜索，bootstrap 里会再存在一份，应用类命中
+  bootstrap 副本而 agent 读系统 classpath 副本 → 探针写进一份、读出另一份 → 覆盖率全空（5 字节空 `.exec`）。
+  若目标用隔离类加载器（部分插件框架）导致应用类看不到 `peruser.*`，需另行把 agent jar 暴露给该加载器。
+- **asm 冲突**：两个 fat jar 都内嵌 asm 9.10.1。若目标应用自带不同 asm 版本且在同一 classpath，可能冲突；
+  把目标应用的 asm 对齐到 9.10.1 即可。
+- **性能**：每个被插桩类每次方法调用多一次 `ThreadProbeStore.getProbes`，高频路径有轻微开销；
+  用 `includes=` 限定只插桩关心的包可显著降低。
+- **`--classfiles` 一定要用磁盘上的原始（未插桩）class**（agent 只改内存运行时类，磁盘字节不变），
+  否则对不上探针 id。
 
-## 在真实目标系统（web3 / Spring Boot，Java 8）上的用法
+---
 
-已用 `/Users/xiaoxiao/oATagent/web3-1.0-SNAPSHOT.jar`（Spring Boot 2.3.12，包 `web3Server`，端口默认 18083）
-验证通过。`run-web3.sh` 即按下面「冒烟测试」方式启动。
+## 八、已知坑 / 排障
 
-### 1) 冒烟测试（autokey，零代码改动）
-`autokey=KEY` 把所有线程探针合并进一个 key（行为类似官方 JaCoCo），用来先确认探针能挂上、能录到真实代码：
+| 现象 | 原因与处理 |
+|---|---|
+| `No enum constant ...OutputMode.xxx` | `output=` 写成了 IP/其它值。`output` 只能是 `file`/`tcpserver`/`tcpclient`/`none`，IP 用 `address=`、端口用 `port=` |
+| exec 只有 5 字节、覆盖率为 0 | 类加载隔离问题（见 §7），或 `includes` 没匹配到（`*` `?` 通配符，用 VM 类名 `com/foo/Bar`） |
+| `dump` 报 `Connection refused` | agent 不是 `output=tcpserver`；或 `address` 留空只绑了 `127.0.0.1`（跨机必须显式 `address=<被测机IP>` 或 `0.0.0.0`）；或防火墙没放行该端口 |
+| `dump` 报 `Socket closed unexpectedly` | 服务端没写 `CMDOK` 结束块；本项目已修复，旧版请重新打包 |
+| `execinfo` 报 `Unknown block type 20` | 读的是 `nc` 直连抓的裸流（含 `CMDOK` 尾块），请用 `dump` 命令抓取 |
+| 报告里源码不显示 | 没传 `--sourcefiles`，或源码路径与 class 的包结构对不上 |
+| `IllegalArgumentException: Unknown agent option` | 已修复：未知参数现在只告警不致命 |
+| `keys` 返回空 / `dump --key` 抓到 0 类 | **直接看 `keys` 的自检输出**（见 §3.3.1），它会区分「一个都没插桩 / 钩子没触发 / 头没读到」。最常见是 `includes` 写成 URL 路径或模块名（`web3Server`）→ 改成 VM 类名（`com/foo/*`），或先 `includes=*` 验证；Spring Boot 可执行 jar 再加 `inclnolocationclasses=true`。改完必须重启 |
+| `dump --key` 对官方 agent 报协议错 | `--key` 是私有扩展，只对 `xiaoxiao-jacoco-agent` 生效；对官方 agent 请去掉 `--key` |
+| `FileNotFoundException: <path> (No such file or directory)` | `--destfile` 的父目录没写权限（如 `/coverage` 需要 root）。新版会明确提示「无法创建输出目录 ...」；换有权限的目录或先 `mkdir -p` |
+| `dump` 不认 `--execdir` | 该参数已移除（只属于 `report`）。`dump` 统一用 `--destfile <路径>`；传了会打印 `warning: 忽略未知选项 --execdir` |
+| 拼错 / 用错选项却毫无反应 | 新版 `dump` / `keys` 会对未知选项打 warning；看到就说明该选项没生效 |
+| 异步（@Async / 线程池）里的代码没覆盖 | 先确认日志有 `async=on(...)`；少数 JVM 不允许重定义 `java.util.concurrent.*`，启动日志会打 `async retransform skipped`，此时改用 `async=false` 并在业务侧手动 `CoverageTracer.wrap(task)` |
+| 启动报 `LinkageError: ... duplicate class definition` | agent 自身类被 transformer 递归拦截；新版已跳过 `peruser/`、`peruserrt/`、`org/jacoco/`、`org/objectweb/`，请重新打包 |
+| 启动报 `Sharing is only supported for boot loader classes` | 只是 JDK 的 CDS 警告（因为往 bootstrap 追加了 `peruserrt`），不影响功能；在意就加 `-Xshare:off` 或 `async=false` |
 
-```bash
-# 用 Java 8 启动（web3 是 JDK 8 编译的 Spring Boot）
-/Library/Java/JavaVirtualMachines/jdk-1.8.jdk/Contents/Home/bin/java \
-  -javaagent:/abs/peruser-jacoco.jar=outdir=coverage,autokey=smoke,includes=web3Server \
-  -jar /Users/xiaoxiao/oATagent/web3-1.0-SNAPSHOT.jar
-```
-
-- 启动后日志首行出现 `[peruser] agent attached; ... mergeMode(autokey=smoke)` 即成功挂接。
-- 正常驱动业务（如 `curl http://127.0.0.1:18083/web3/circulate?n=5` 等控制器接口）。
-- **停止 web3（Ctrl-C）** 触发 JVM 关闭钩子，写出 `coverage/coverage-smoke.exec`。
-- 生成**带源码**报告（用官方 jacococli，最省事；本工程不含该 jar，从 jacoco 发行包取）：
-
-```bash
-unzip -oq web3-1.0-SNAPSHOT.jar 'BOOT-INF/classes/*' -d /tmp/web3-classes
-JACOCOCLI=/Users/xiaoxiao/download-Package/jacoco-0.8.15/lib/jacococli.jar   # 或你本地任意 jacoco 发行包中的 jacococli.jar
-java -jar "$JACOCOCLI" report coverage/coverage-smoke.exec \
-  --classfiles /tmp/web3-classes/BOOT-INF/classes \
-  --sourcefiles /path/to/remoteweb3/src/main/java \
-  --html reports-smoke
-# 打开 reports-smoke/index.html
-```
-> `--sourcefiles` 就是 web3 的 Java 源码根目录（你之前用 `jacococli report --sourcefiles` 出过源码的那个目录）。
-
-> 实测：单次 `/web3/*` 探测后，`Web3Controller.circulate(int)` = **100%**，其余方法按是否真正进入方法体分别 0%~66%，
-> 证明探针在真实 web3 代码上正确记录。
-
-### 2) 按用户 / 按用例分离（control 端点，零改目标系统）
-> **关键**：本方案**不需要修改目标系统源码、不需要重打包** web3。A/B 分离的 key 由 **agent 内嵌的 HTTP 控制端点**
-> 从进程外设定，适合「单实例 + 时间窗口」式驱动：先设 `key=1` 跑 A、实时 `dump&reset`，再设 `key=2` 跑 B。
-> （若你愿意改目标系统，也可以用 `CoverageTracer` 把每个请求包一层，效果等价，见 §下「CoverageTracer 模式」。）
-
-启动命令加 `control=ADDR:PORT` 启用内嵌控制端点（复用 JDK 自带 `com.sun.net.httpserver`，无额外依赖）：
-
-```bash
-/Library/Java/JavaVirtualMachines/jdk-1.8.jdk/Contents/Home/bin/java \
-  -javaagent:/abs/peruser-jacoco.jar=outdir=coverage,includes=web3Server,control=127.0.0.1:9300 \
-  -jar /Users/xiaoxiao/oATagent/web3-1.0-SNAPSHOT.jar
-```
-
-agent 启动后日志会打印 `control server started: http://127.0.0.1:9300  ( /key /dump /keys /health )`。端点：
-
-- `GET /health` —— 健康检查。
-- `GET /key?name=X` —— 设定**全局当前归属 key**（进程外驱动 A/B 分离）；不带 `name` 则返回当前 key。
-- `GET /dump[?key=X][&reset=true]` —— 把覆盖率写成 `coverage-<key>.exec`（**合并写**，见下「并发不互相覆盖」）。
-  - 不带 `key`：写出**所有** key；带 `key=2`：只写出 `key=2`（不影响其它 key 的内存累计）。
-  - `reset=true`：写出后清空对应 key 的内存累计（等价于 `jacococli dump --reset`，但天然支持多 key）。
-- `GET /reset[?key=X]` —— 清空累计探针；不带 `key` 清空**全部**，带 `key=2` 只清空 `key=2`（不影响其它 key）。
-- `GET /keys` —— 列出当前所有 key 与模式。
-
-> **并发不互相覆盖（重要）**：`/dump` 写 `coverage-<key>.exec` 时采用**合并写**——若文件已存在，当前内存探针会按位 OR 合并进已有数据，
-> 而不是从零覆盖。因此「中途 `/dump?reset=true` 清了某 key 的内存、该 key 仍在线继续跑、再 `/dump`」不会把已落盘数据覆盖成不完整快照，
-> 而是累加回来。多 key 并发、有人还在跑时，互不干扰。
-> 若想让某个 key **干净重跑**（丢弃历史），先 `rm coverage-<key>.exec` 再重新打业务 + dump；`reset` 只清内存，文件因合并写会保留并累加。
-
-驱动 A/B 分离（shell 示例；**localhost 务必绕过代理** `curl --noproxy '*'`，否则连不上 127.0.0.1 端口）：
-
-```bash
-# ---- 用户 A ----
-curl --noproxy '*' -s "http://127.0.0.1:9300/key?name=1"        # 设全局当前 key=1
-curl --noproxy '*' -s "http://127.0.0.1:18083/web3/circulate?n=5"   # 用 A 的凭证驱动业务
-curl --noproxy '*' -s "http://127.0.0.1:9300/dump?reset=true"   # 实时落盘并清空 -> coverage-1.exec
-
-# ---- 用户 B ----
-curl --noproxy '*' -s "http://127.0.0.1:9300/key?name=2"        # 切到 key=2
-curl --noproxy '*' -s "http://127.0.0.1:18083/web3/circulate?n=5"   # 用 B 的凭证驱动业务
-curl --noproxy '*' -s "http://127.0.0.1:9300/dump?reset=true"   # -> coverage-2.exec
-```
-
-机制：被插桩类在每个方法入口调 `ThreadProbeStore.getProbes`，归属优先级为
-① `CoverageTracer.begin(key)` 设的线程局部 key（需目标系统包一层，本方案不用）→
-② 控制端点设的**全局当前 key**（本方案用）→
-③ 都没有则探针直接丢弃（不落盘）。
-`/key` 设的全局 key 对**所有线程**生效，所以「先设 key=1 跑完 A → `dump&reset` → 再设 key=2 跑 B」即可干净分离。
-JVM 正常关闭（Ctrl-C）时关闭钩子也会把尚未 reset 的 key 各出一份 `.exec`。
-
-> 与 `autokey` 互斥：`autokey` 是「全部线程合并一个 key」的冒烟模式；做按用户分离时不要带 `autokey`。
-> 本方案不依赖 `CoverageTracer`、不改目标系统，但需要你从进程外用 `/key` + `/dump` 驱动。
-
-### 3) 并发按用户分离（headerkey，零改目标系统、真正支持并发、框架无关）
-> **关键**：如果你要的是「A、B **同时**请求 web3，各自归到 coverage-1 / coverage-2」——即单实例并发、按请求归属——用本方案。
-> 它**不需要改 web3 源码、不需要重打包**，也不依赖顺序驱动，并且**不绑定任何具体 Web 框架**。
-> agent 在字节码层给所有 Servlet 容器的统一入口 `javax.servlet.http.HttpServlet` / `jakarta.servlet.http.HttpServlet`
-> 的 `service(ServletRequest, ServletResponse)` 方法包一层钩子（Tomcat/Jetty/Undertow 都会调用它，Spring 也经由它进入）：
-> 每次请求入口读请求头（默认 `X-Coverage-Key`），非空就把**这一次请求**归属到该 key（线程级，并发互不串）；出口 `finally` 提交。
-> 请求**不带**该头时回退到全局 `CURRENT_KEY`（§2 控制端点），两种机制可共存。
-
-启动命令加 `headerkey=NAME`（建议同时保留 `control` 端点便于实时 dump / 看 key）：
-
-```bash
-/Library/Java/JavaVirtualMachines/jdk-1.8.jdk/Contents/Home/bin/java \
-  -javaagent:/abs/peruser-jacoco.jar=outdir=coverage,includes=web3Server,headerkey=X-Coverage-Key,control=127.0.0.1:9300 \
-  -jar /Users/xiaoxiao/oATagent/web3-1.0-SNAPSHOT.jar
-```
-
-驱动（A、B 可**完全并发**，不再需要顺序窗口）：
-
-```bash
-# A 带 X-Coverage-Key:1，B 带 X-Coverage-Key:2，同时打业务接口
-curl --noproxy '*' -H "X-Coverage-Key: 1" "http://127.0.0.1:18083/web3/circulate?n=5"   # 用 A 凭证
-curl --noproxy '*' -H "X-Coverage-Key: 2" "http://127.0.0.1:18083/web3/circulate?n=5"   # 用 B 凭证
-# 跑完后一次 dump，两个 key 各出一份（合并写：中途再 dump 也不会覆盖，只会累加）
-curl --noproxy '*' -s "http://127.0.0.1:9300/dump?reset=true"
-# -> 同时生成 coverage-1.exec 与 coverage-2.exec
-# 只关心某个用户时也可单 key 操作，互不干扰：
-#   curl --noproxy '*' -s "http://127.0.0.1:9300/dump?key=2"      # 只出 key=2
-#   curl --noproxy '*' -s "http://127.0.0.1:9300/reset?key=2"     # 只清 key=2 的内存累计
-```
-
-机制：被插桩类的方法入口调 `ThreadProbeStore.getProbes`，归属优先级为
-① `CoverageTracer.begin(key)` / **请求头 key**（线程局部，本方案走这条）—— agent 在 `HttpServlet.service` 入口 `begin`、出口 `finally` `end`，每条请求独立线程级 key →
-② 全局 `CURRENT_KEY`（§2 控制端点）→
-③ 都没有则探针直接丢弃（不落盘）。
-因为每次请求在 `HttpServlet.service` 的线程里独立 `begin/end`，A、B 并发请求分别落在各自线程的 key，天然互不污染，即「单实例并发按用户分离」。
-
-> 验证：本地对真实 `javax.servlet.http.HttpServlet` 做了 ASM 织入测试（`COMPUTE_FRAMES` 用目标类加载器解析父类、失败回退 `java/lang/Object`，不再因加载不到 Spring 类而崩溃），并跑了并发链路测试——按请求头归属后 `dumpAll` 同时产出 `coverage-1.exec` 与 `coverage-2.exec`，且两 key 覆盖位不同。
-
-#### （可选）CoverageTracer 模式（改目标系统时更细粒度）
-若你**愿意**在目标系统里包一层，可在「一个工作单元」的边界调 `CoverageTracer`：
-
-```java
-import peruser.CoverageTracer;
-try (CoverageTracer t = CoverageTracer.start("user-A")) {   // 自动 begin/end
-    targetSystem.doWork();
-}
-```
-
-`start/begin` 设的是**线程局部** key（优先级 ①，高于全局 key），`end/close` 在单元结束时按 key 合并并清空（线程池复用安全）。
-这适合「同进程内多个工作单元并发、且每个单元的 key 在代码里就能确定」的场景；否则用上面的控制端点更省事。
-`integration/` 目录保留了 web3 的反射版拦截器模板，仅作参考，本方案不要求使用。
-
-### 已知坑（web3 实测）
-- 控制器类级基路径是 `/web3`（如 `Web3Controller` 上的 `@RequestMapping("/web3")`），接口是 `/web3/circulate` 等。
-- `bootstrap.yml` 连 Nacos（`172.16.10.77:8848`）；沙箱里连不上时应用仍用 `application.yml` 默认值正常启动，
-  但依赖 Nacos/DB 的接口会 400/500（属业务外部依赖，不影响探针本身）。
-- 报告 `--classes` 一定要用磁盘上的**原始** class（agent 只改内存运行时类，磁盘字节不变），否则对不上探针 id。
+---
 

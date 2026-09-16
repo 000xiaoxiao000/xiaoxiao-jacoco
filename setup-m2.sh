@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 首次在某台机器上用 Maven 构建 peruser-jacoco 前，需要先把手工程 lib/ 里的
+# 首次在某台机器上用 Maven 构建 xiaoxiao-jacoco 前，需要先把手工程 lib/ 里的
 # 【定制版】jacoco（版本号带日期后缀）和 asm 装进本地 .m2。
 # 标准 Maven Central 的 org.jacoco:org.jacoco.core:0.8.15 是另一份字节码，
 # 可能与本项目依赖的定制版内部 API / 覆盖率格式不一致，请勿替换。
@@ -23,3 +23,5 @@ fi
   -DgroupId=org.jacoco -DartifactId=org.jacoco.report -Dversion=0.8.15.202606040825 -Dpackaging=jar
 
 echo "[setup-m2] 完成。现在可以运行： mvn clean package"
+echo "         （只打包 agent：mvn -pl xiaoxiao-jacoco-agent -o package）"
+echo "         （只打包 cli  ：mvn -pl xiaoxiao-jacoco-cli   -o package）"

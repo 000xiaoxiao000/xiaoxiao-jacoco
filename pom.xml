@@ -4,100 +4,78 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.peruser</groupId>
-    <artifactId>peruser-jacoco</artifactId>
+    <groupId>com.xiaoxiao</groupId>
+    <artifactId>xiaoxiao-jacoco</artifactId>
     <version>1.0.0</version>
-    <packaging>jar</packaging>
+    <packaging>pom</packaging>
 
-    <name>peruser-jacoco</name>
-    <description>按用户/按用例分离的 Java 覆盖率 agent（peruser-jacoco）</description>
+    <name>xiaoxiao-jacoco</name>
+    <description>
+        xiaoxiao-jacoco：按用户 / 按用例分离覆盖率的 JaCoCo 增强套件。
+        拆分为两个【可独立打包】的模块：
+          - xiaoxiao-jacoco-agent：Java Agent（挂在目标 JVM 上采集），支持 JaCoCo agent 的全部参数；
+          - xiaoxiao-jacoco-cli   ：离线命令行工具（report / merge / dump / instrument / classinfo / execinfo / version），
+                                    支持 JaCoCo cli 的全部命令与参数。
+        两个模块互不依赖：目标系统只需 agent jar，出报告的机器只需 cli jar。
+    </description>
+
+    <modules>
+        <module>xiaoxiao-jacoco-agent</module>
+        <module>xiaoxiao-jacoco-cli</module>
+    </modules>
 
     <properties>
-        <!-- 目标字节码 = Java 8，确保在 Java 8+ 的目标 JVM（如 web3）上可加载。
-             即使本机 Maven 跑在 JDK 21，release 8 也能产出 Java 8 字节码。 -->
+        <!-- 目标字节码 = Java 8，保证在 Java 8+ 的目标 JVM 上可加载 -->
         <maven.compiler.release>8</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <asm.version>9.10.1</asm.version>
         <!-- 注意：jacoco 是本地定制构建（版本号带日期后缀），不是 Maven Central 的标准 0.8.15。
-             为保证覆盖率格式/字节码与之前完全一致，必须用本地 .m2 里的定制版（见 setup-m2.sh），
-             不要用 org.jacoco:org.jacoco.core:0.8.15。 -->
+             为保证覆盖率格式/字节码与之前完全一致，必须用本地 .m2 里的定制版（见 setup-m2.sh）。 -->
         <jacoco.version>0.8.15.202606040825</jacoco.version>
     </properties>
 
-    <dependencies>
-        <!-- ASM：字节码插桩与 DispatcherServlet/HttpServlet 钩子织入。只需 core，不需要 commons/tree/analysis -->
-        <dependency>
-            <groupId>org.ow2.asm</groupId>
-            <artifactId>asm</artifactId>
-            <version>${asm.version}</version>
-        </dependency>
-        <!-- JaCoCo core：探针插桩（org.jacoco.core.internal.*）与 ExecutionData 写出 -->
-        <dependency>
-            <groupId>org.jacoco</groupId>
-            <artifactId>org.jacoco.core</artifactId>
-            <version>${jacoco.version}</version>
-        </dependency>
-        <!-- JaCoCo report：peruser.ReportCli 出 HTML/CSV 报告 -->
-        <dependency>
-            <groupId>org.jacoco</groupId>
-            <artifactId>org.jacoco.report</artifactId>
-            <version>${jacoco.version}</version>
-        </dependency>
-    </dependencies>
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-tree</artifactId>
+                <version>${asm.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jacoco</groupId>
+                <artifactId>org.jacoco.core</artifactId>
+                <version>${jacoco.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jacoco</groupId>
+                <artifactId>org.jacoco.report</artifactId>
+                <version>${jacoco.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <build>
-        <finalName>peruser-jacoco</finalName>
-        <!-- 工程的源码放在 src/peruser/（而非 Maven 默认的 src/main/java），这里显式指回 src，
-             避免移动文件、保持现有目录结构。integration/ 在 src 之外，不会被编译。 -->
-        <sourceDirectory>src</sourceDirectory>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.11.0</version>
-                <configuration>
-                    <release>8</release>
-                </configuration>
-            </plugin>
-
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.1</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <!-- 打成 fat agent jar：把 asm + jacoco 全部并进去 -->
-                            <filters>
-                                <filter>
-                                    <artifact>*:*</artifact>
-                                    <excludes>
-                                        <!-- 排除 META-INF 与 Java 9 的 module-info.class，保持 fat jar 干净 -->
-                                        <exclude>META-INF/**</exclude>
-                                        <exclude>module-info.class</exclude>
-                                        <exclude>**/module-info.class</exclude>
-                                    </excludes>
-                                </filter>
-                            </filters>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <manifestEntries>
-                                        <Premain-Class>peruser.PerUserAgent</Premain-Class>
-                                        <Agent-Class>peruser.PerUserAgent</Agent-Class>
-                                        <Can-Redefine-Classes>true</Can-Redefine-Classes>
-                                        <Can-Retransform-Classes>true</Can-Retransform-Classes>
-                                    </manifestEntries>
-                                </transformer>
-                            </transformers>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.11.0</version>
+                    <configuration>
+                        <release>8</release>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>3.5.1</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
     </build>
 </project>
