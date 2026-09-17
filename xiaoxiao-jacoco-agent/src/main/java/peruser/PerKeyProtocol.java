@@ -28,6 +28,7 @@ import java.util.Set;
  *   0x22 BLOCK_STATS       服务端 -> 客户端：运行期概况
  *   0x44 BLOCK_CMDCLASSES  客户端 -> 服务端：无 payload，请求导出被插桩类的原始字节码
  *   0x23 BLOCK_CLASSES     服务端 -> 客户端：long zip 长度 + zip 字节（被插桩类原始字节）
+ *   0x45 BLOCK_CMDSETKEY   客户端 -> 服务端：UTF key（空串=清除），设定全局当前 key
  * </pre>
  */
 final class PerKeyProtocol {
@@ -43,6 +44,12 @@ final class PerKeyProtocol {
 
     /** 客户端 -> 服务端：请求导出被插桩类的原始字节码（dumpclasses 命令）。 */
     static final byte BLOCK_CMDCLASSES = 0x44;
+
+    /**
+     * 客户端 -> 服务端：设定【全局当前 key】（进程外驱动，零改业务代码）。
+     * payload: UTF key —— 空串表示清除。
+     */
+    static final byte BLOCK_CMDSETKEY = 0x45;
 
     /** 服务端 -> 客户端：key 列表响应。 */
     static final byte BLOCK_KEYS = 0x21;

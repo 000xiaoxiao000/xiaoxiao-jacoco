@@ -31,6 +31,7 @@ final class RemoteDump {
     private static final byte BLOCK_STATS = 0x22;
     private static final byte BLOCK_CMDCLASSES = 0x44;
     private static final byte BLOCK_CLASSES = 0x23;
+    private static final byte BLOCK_CMDSETKEY = 0x45;
 
     private static final int SO_TIMEOUT = 10_000;
 
@@ -63,6 +64,13 @@ final class RemoteDump {
 
         void cmdClasses() throws IOException {
             out.writeByte(BLOCK_CMDCLASSES);
+            out.flush();
+        }
+
+        /** 设定全局当前 key；key 为 null/空串表示清除。 */
+        void cmdSetKey(String key) throws IOException {
+            out.writeByte(BLOCK_CMDSETKEY);
+            out.writeUTF(key == null ? "" : key);
             out.flush();
         }
     }
@@ -270,6 +278,31 @@ final class RemoteDump {
                 throw new IOException("agent 未返回 classes 数据（可能版本过旧不支持 dumpclasses，请升级 agent）");
             }
             return reader.classesZip;
+        } finally {
+            socket.close();
+        }
+    }
+
+    /**
+     * 设定 agent 的【全局当前 key】（私有扩展，仅 xiaoxiao-jacoco-agent 支持）。
+     *
+     * <p>这是「零改业务代码」的按 key 分离手段：归属判定发生在进程级，不依赖线程传递，
+     * 因此 parallelStream / 自研线程池等场景也能采到。适合「单实例 + 时间窗口」式分离：
+     * 设 key=A → 跑 A → dump --key A --reset → 设 key=B → 跑 B → dump --key B。
+     *
+     * @param key null 或空串表示清除全局 key
+     */
+    static void setCurrentKey(String address, int port, String key, int retry, long retryDelay)
+            throws IOException {
+        final Socket socket = connect(address, port, retry, retryDelay);
+        try {
+            socket.setSoTimeout(SO_TIMEOUT);
+            final CmdWriter writer = new CmdWriter(socket.getOutputStream());
+            final CmdReader reader = new CmdReader(socket.getInputStream());
+            writer.cmdSetKey(key);
+            if (!reader.read()) {
+                throw new IOException("Socket closed unexpectedly.");
+            }
         } finally {
             socket.close();
         }

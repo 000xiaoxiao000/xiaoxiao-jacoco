@@ -25,14 +25,27 @@ import java.util.zip.ZipOutputStream;
  */
 final class ClassCache {
 
-    /** 累计原始字节上限，超过即停缓存。常见应用全量类字节码约 20~80MB，256MB 留足余量。 */
-    private static final long MAX_BYTES = 256L * 1024 * 1024;
+    /**
+     * 累计原始字节上限，超过即停缓存。
+     *
+     * <p>默认 64MB（可用 {@code classcachemax=<MB>} 调整）。这里刻意保守：这块内存是【从目标系统
+     * 的堆里抠出来的】，探针不该为了自己方便就占掉被测应用几百 MB —— 「探针不能影响目标系统」
+     * 不只是不改业务代码，也包括不抢它的资源。
+     */
+    private static volatile long MAX_BYTES = 64L * 1024 * 1024;
 
     private static final Map<String, byte[]> CACHE = new ConcurrentHashMap<>();
     private static final AtomicLong TOTAL = new AtomicLong(0);
     private static final AtomicBoolean DISABLED = new AtomicBoolean(false);
 
     private ClassCache() {
+    }
+
+    /** 由 agent 启动时按 classcachemax= 设定上限（MB -> 字节）。 */
+    static void configure(long maxBytes) {
+        if (maxBytes > 0) {
+            MAX_BYTES = maxBytes;
+        }
     }
 
     /** 缓存一个类的原始字节（插桩前）。className 为 VM 内部名（com/foo/Bar），作为 zip entry 的目录结构。 */

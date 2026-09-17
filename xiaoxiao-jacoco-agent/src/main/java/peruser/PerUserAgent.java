@@ -46,10 +46,15 @@ public final class PerUserAgent {
         // 探针写进一份、读出另一份，覆盖率全空。故保持「仅系统类路径」。
         ThreadProbeStore.configure(o.merge, o.mergeKey);
         RequestKeyHook.setDebug(o.debug);
+        ClassCache.configure(o.classCacheMaxBytes);
+        MqKeyHook.configure(o.mqHeader, o.debug);
         inst.addTransformer(new PerUserTransformer(o), true);
 
         if (o.asyncPropagate) {
             enableAsyncPropagation(inst);
+        }
+        if (o.streamPropagate) {
+            enableStreamPropagation(inst);
         }
 
         System.out.println("[xiaoxiao-jacoco] agent attached: " + o
@@ -59,7 +64,9 @@ public final class PerUserAgent {
                     ? (BootClassInjector.available()
                         ? "  async=on(线程池/@Async/CompletableFuture 已传递 key)"
                         : "  async=on(但 bootstrap 注入失败，仅 new Thread 生效)")
-                    : "  async=off"));
+                    : "  async=off")
+                + (o.streamPropagate ? "  streamkey=on(parallelStream 已传递 key)" : "")
+                + (o.mqKey ? "  mqkey=on(" + o.mqHeader + " 已注入 Kafka/RocketMQ/RabbitMQ 收发两端)" : ""));
         System.out.println("[xiaoxiao-jacoco] 过滤条件: includes=" + o.agentOptions().getIncludes()
                 + "  excludes=" + o.agentOptions().getExcludes()
                 + "  exclclassloader=" + o.agentOptions().getExclClassloader()
@@ -112,8 +119,8 @@ public final class PerUserAgent {
     /**
      * includes 写错是「覆盖率全空」的头号原因。JaCoCo 的 WildcardMatcher 用的是
      * {@code Pattern.matcher(s).matches()}——<b>全匹配</b>，不是前缀匹配：
-     * 写 {@code includes=web3Server} 只会匹配「VM 类名【恰好】等于 web3Server」的类，
-     * 而真实类名是 {@code com/xxx/web3Server/...}，永远不可能相等，结果就是一个类都没插桩。
+     * 写 {@code includes=webServer} 只会匹配「VM 类名【恰好】等于 webServer」的类，
+     * 而真实类名是 {@code com/xxx/webServer/...}，永远不可能相等，结果就是一个类都没插桩。
      * 这里在启动时就把这类写法直接点名。
      */
     private static void warnIncludes(final String includes) {
@@ -136,7 +143,7 @@ public final class PerUserAgent {
                 System.err.println("  -> 真实类名形如 com/公司/模块/xxx/Controller，永远不可能等于 '" + part
                         + "'，结果就是 0 个类被插桩、覆盖率全空");
                 System.err.println("  -> includes 匹配的是【VM 类名】(com/foo/Bar)，不是 URL 路径"
-                        + "（/web301/testWeb3）、不是模块名、不是包名简写");
+                        + "（/web3/testWeb）、不是模块名、不是包名简写");
                 System.err.println("  -> 改成 includes=*" + part + "*   （类名任意位置包含 " + part + "，最稳）");
                 System.err.println("  -> 或 includes=" + part + "*    （类名以 " + part + " 开头，仅当它出现在包名开头时有效）");
                 System.err.println("  -> 拿不准包名就先 includes=* 跑通，再看 cli keys 输出里给的包名样例");
@@ -175,6 +182,23 @@ public final class PerUserAgent {
             } catch (Throwable t) {
                 // 类未加载 / 不允许重定义都不是致命问题：未加载的会在加载时织入
                 System.err.println("[xiaoxiao-jacoco] async retransform skipped for " + cn + " -> " + t);
+            }
+        }
+    }
+
+    /**
+     * 让 parallelStream 的织入生效：ForkJoinTask 通常在 premain 之前就已被 JVM 加载
+     * （commonPool 初始化），必须显式 retransform；否则要等到下次类加载才生效。
+     */
+    private static void enableStreamPropagation(Instrumentation inst) {
+        if (!BootClassInjector.available()) {
+            return;
+        }
+        for (String cn : StreamKeyWeaver.targetClassNames()) {
+            try {
+                inst.retransformClasses(Class.forName(cn, false, null));
+            } catch (Throwable t) {
+                System.err.println("[xiaoxiao-jacoco] stream retransform skipped for " + cn + " -> " + t);
             }
         }
     }

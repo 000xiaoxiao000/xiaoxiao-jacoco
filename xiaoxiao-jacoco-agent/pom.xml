@@ -79,6 +79,17 @@
                                     <pattern>org.objectweb.asm</pattern>
                                     <shadedPattern>com.xiaoxiao.jacoco.shaded.asm</shadedPattern>
                                 </relocation>
+                                <!-- JaCoCo core 同样必须私有化。
+                                     目标系统里很可能已经有 org.jacoco.*（另一个版本的 jacoco 依赖、
+                                     或另一个覆盖率/诊断 agent），裸打包就会撞车 —— 那是让【目标系统给探针让路】。
+                                     重定位后探针自带一份私有 JaCoCo，与业务完全隔离。
+                                     注意：relocation 是【前缀匹配】，所以 peruser / peruserrt 不能拿来当 pattern
+                                     （peruserrt 会被 peruser 前缀误伤），它们保持原样：peruserrt 是业务可见 API，
+                                     peruser 是探针私有实现、名字空间独立。 -->
+                                <relocation>
+                                    <pattern>org.jacoco</pattern>
+                                    <shadedPattern>com.xiaoxiao.jacoco.shaded.jacoco</shadedPattern>
+                                </relocation>
                             </relocations>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">

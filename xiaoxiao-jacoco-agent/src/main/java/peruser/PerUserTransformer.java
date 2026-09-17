@@ -36,6 +36,27 @@ public final class PerUserTransformer implements ClassFileTransformer {
             return null;
         }
         Diagnostics.classSeen();
+        // MQ 生产端（Kafka/RocketMQ/RabbitMQ 客户端）：三方类通常不在 includes= 里，
+        // 所以这条分支独立于覆盖率插桩，按精确类名匹配，匹配不上零开销。
+        if (options.mqKey && MqKeyWeaver.isProducerClass(className)) {
+            try {
+                byte[] out = MqKeyWeaver.weaveProducer(buf, className);
+                if (out != null) return out;
+            } catch (Throwable t) {
+                System.err.println("[xiaoxiao-jacoco] mq producer weave failed: " + className + " -> " + t);
+                return null;
+            }
+        }
+        // parallelStream 归属：织入 ForkJoinTask.fork/doExec，让流里的覆盖率也能按请求细分。
+        // 默认关闭（streamkey=true 才启用）—— ForkJoinTask 是并行热路径，不经用户同意不插指令。
+        if (options.streamPropagate && BootClassInjector.available() && StreamKeyWeaver.isTarget(className)) {
+            try {
+                return StreamKeyWeaver.weave(buf);
+            } catch (Throwable t) {
+                System.err.println("[xiaoxiao-jacoco] stream weave failed: " + className + " -> " + t);
+                return null;
+            }
+        }
         // 异步归属：给 JDK 线程池的提交入口织入「提交时捕获 key、执行时恢复 key」，
         // 让 @Async / CompletableFuture / 线程池里的覆盖也归到发起请求的 key。
         // JDK 类由 bootstrap 加载，必须等 peruserrt 注入成功才织入；可用 async=false 关闭。
@@ -80,6 +101,21 @@ public final class PerUserTransformer implements ClassFileTransformer {
         try {
             byte[] out = InstrumenterFlow.instrument(buf, className.replace('/', '.'));
             Diagnostics.classInstrumented(className);
+            // MQ 消费端：@KafkaListener / @RabbitListener / @RocketMQMessageListener 等，
+            // 探针自己从消息 header 取回 key，业务不用写一行代码。
+            if (options.mqKey) {
+                try {
+                    byte[] w = MqKeyWeaver.weaveConsumer(out, loader);
+                    if (w != null) {
+                        out = w;
+                        if (options.debug) {
+                            System.out.println("[xiaoxiao-jacoco] mq consumer woven: " + className);
+                        }
+                    }
+                } catch (Throwable t) {
+                    System.err.println("[xiaoxiao-jacoco] mq consumer weave failed: " + className + " -> " + t);
+                }
+            }
             if (options.debug) {
                 System.out.println("[xiaoxiao-jacoco] instrumented: " + className);
             }

@@ -101,7 +101,7 @@ public final class DumpCommand {
                         + "，HTTP 钩子触发=" + rep.requestsHooked + "，成功归属=" + rep.requestsTagged);
                 if (rep.classesInstrumented == 0) {
                     System.err.println("  -> 一个类都没插桩：检查 agent 的 includes（要写 VM 类名 com/foo/Bar，"
-                            + "不是 URL 路径 /web301/testWeb3）；"
+                            + "不是 URL 路径 /web/testWeb）；"
                             + (rep.suggestedIncludes.isEmpty() ? "" : "建议 includes=" + rep.suggestedIncludes.get(0)));
                 } else if (rep.classesNoLocation > 0) {
                     System.err.println("  -> " + rep.classesNoLocation

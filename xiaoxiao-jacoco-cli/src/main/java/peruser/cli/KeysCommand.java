@@ -36,7 +36,7 @@ public final class KeysCommand {
             if (rep.classesInstrumented == 0) {
                 System.out.println("  ! agent 到目前为止【一个类都没有插桩】(classes instrumented=0)");
                 System.out.println("    -> 根因：includes/excludes 没匹配上。includes 匹配的是【VM 类名】(com/foo/Bar)，");
-                System.out.println("       不是 URL 路径（/web301/testWeb3）、不是模块名（web3Server）、不是包名简写。");
+                System.out.println("       不是 URL 路径（/web/testWeb）、不是模块名（webServer）、不是包名简写。");
                 if (!rep.suggestedIncludes.isEmpty()) {
                     System.out.println("    -> 该进程里已加载的类，包名样例：" + rep.suggestedIncludes);
                     System.out.println("       建议把 agent 参数改成 includes=" + rep.suggestedIncludes.get(0)

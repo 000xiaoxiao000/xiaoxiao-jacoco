@@ -179,7 +179,7 @@ public final class Diagnostics {
         if (CLASSES_INSTRUMENTED.get() == 0) {
             sb.append("\n  (1) 一个类都没插桩：includes/excludes 没匹配上。")
                     .append("includes 匹配的是【VM 类名】(com/foo/Bar)，是全匹配（不是前缀匹配）；")
-                    .append("不是 URL 路径（/web301/testWeb3）、不是模块名、不是包名简写。")
+                    .append("不是 URL 路径（/web/testWeb）、不是模块名、不是包名简写。")
                     .append("（若你的应用还在启动中，等启动完再看这条提示）");
             List<String> sug = suggestedIncludes();
             if (!sug.isEmpty()) {

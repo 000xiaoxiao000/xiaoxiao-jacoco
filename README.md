@@ -106,7 +106,7 @@ java -jar xiaoxiao-jacoco-cli.jar report \
 | `address=<host/ip>` | tcpserver 监听地址 / tcpclient 目标地址 | 回环地址 |
 | `port=<port>` | tcpserver 监听端口 / tcpclient 目标端口 | `6300` |
 | `classdumpdir=<path>` | 插桩前把**原始未插桩** class 字节落盘到该目录 | 不落盘 |
-| `jmx=true\|false` | 注册 `org.jacoco:type=Runtime` MBean，支持运行时 dump/reset | `false` |
+| `jmx=true\|false` | 注册 `com.xiaoxiao.jacoco:type=Runtime` MBean，支持运行时 dump/reset | `false` |
 
 未知参数**只打印告警不致命**（官方会对未知 key 直接 FATAL）。
 
@@ -114,14 +114,14 @@ java -jar xiaoxiao-jacoco-cli.jar report \
 > JaCoCo 的 `WildcardMatcher` 用 `Pattern.matcher(s).matches()`，所以每个匹配项必须覆盖**整个** VM 类名
 > （`com/foo/Bar` 这种斜杠形式）。因此：
 >
-> | 写法 | 实际效果 |
-> |---|---|
-> | `includes=web3Server` | ❌ 只匹配「类名**恰好**等于 `web3Server`」的类 → 几乎必然 **0 个类插桩、覆盖率全空** |
-> | `includes=web3Server*` | 只匹配类名以 `web3Server` **开头**的（仅当它位于包名开头） |
-> | `includes=*web3Server*` | ✅ 类名任意位置包含 `web3Server` |
-> | `includes=com.remote3.web3.*` | ✅ 该包及其子包下所有类（推荐） |
+> | 写法                        | 实际效果                                                                            |
+> |-----------------------------|-------------------------------------------------------------------------------------|
+> | `includes=webServer`        | ❌ 只匹配「类名**恰好**等于 `webServer`」的类 → 几乎必然 **0 个类插桩、覆盖率全空** |
+> | `includes=webServer*`       | 只匹配类名以 `webServer` **开头**的（仅当它位于包名开头）                           |
+> | `includes=*webServer*`      | ✅ 类名任意位置包含 `webServer`                                                     |
+> | `includes=com.remote.web.*` | ✅ 该包及其子包下所有类（推荐）                                                     |
 >
-> `includes` 匹配的是 **VM 类名**，不是 URL 路径（`/web301/testWeb3`）、不是模块名、不是包名简写。
+> `includes` 匹配的是 **VM 类名**，不是 URL 路径（`/web/testWeb`）、不是模块名、不是包名简写。
 > 写错时 agent 启动日志会直接点名并给出改法；拿不准就先 `includes=*` 跑通，再看 §3.3.1 的自检输出。
 
 ### 2.2 xiaoxiao-jacoco 扩展参数（按 key 分离）
@@ -132,8 +132,16 @@ java -jar xiaoxiao-jacoco-cli.jar report \
 | `autokey=KEY` | 冒烟模式：所有线程合并进单一 KEY | 不启用 |
 | `headerkey=NAME` | 按 HTTP 请求头 NAME 归属 | 不启用 |
 | `async=true\|false` | 异步（线程池 / @Async / CompletableFuture）key 传递，见 §2.6 | `true` |
+| `streamkey=true` | parallelStream / ForkJoinTask 的 key 传递，见 §2.7（**默认关**：热路径） | `false` |
+| `mqkey=true` | 跨进程 MQ 的 key 透传（Kafka / RocketMQ / RabbitMQ），见 §2.8（**默认关**：会加消息头） | `false` |
+| `mqheader=NAME` | MQ 透传用的 header / property 名 | `X-Coverage-Key` |
+| `classcache=true\|false` | 内存缓存被插桩类的原始字节（`dumpclasses` 依赖它） | `true` |
+| `classcachemax=MB` | classcache 的字节上限，超过即停止缓存 | `64` |
 | `cleanup=24h` | 定期清理 outdir 下的旧 exec/class（`30m` / `2h` / `1d`，纯数字按小时） | 不启用 |
 | `debug=true` | 打印被插桩的类名与每次请求归属明细（排障用，默认只打前 3 次归属） | `false` |
+
+> 后四个「默认关 / 有限额」的参数，是「探针不影响目标系统」这条底线的具体体现：
+> 热路径织入与内存/消息上的额外开销，都必须由使用方显式点头才会发生。
 
 ### 2.3 exec 文件名规则
 
@@ -175,7 +183,8 @@ java -jar xiaoxiao-jacoco-cli.jar report \
 -javaagent:...=outdir=coverage,jmx=true
 ```
 
-MBean 对象名 `org.jacoco:type=Runtime`，方法：`dump()` / `reset()` / `getVersion()` /
+MBean 对象名 `com.xiaoxiao.jacoco:type=Runtime`（刻意不占用官方 `org.jacoco:type=Runtime`，
+避免与已挂的官方 jacoco agent 撞名），方法：`dump()` / `reset()` / `getVersion()` /
 `getSessionId()` / `setSessionId()`。可用 `jconsole` / `jmxterm` / 代码调用。
 
 ### 2.6 异步归属：线程池 / @Async / CompletableFuture 不丢 key（默认开启）
@@ -206,6 +215,70 @@ key 原本存在 ThreadLocal 里，异步子线程拿不到 —— 覆盖要么�
 
 自研线程池（任务先进自己的队列、再由别的线程取出执行，绕开了 JDK 提交入口）可手动包一层；
 关闭后实测影响：线程池 / CompletableFuture 里的覆盖**全部丢失**（`async=false` 对照组结果为 0）。
+
+### 2.7 parallelStream 归属：`streamkey=true`（默认关闭）
+
+`parallelStream` / `ForkJoinTask.fork()` **不走**线程池的提交入口，所以 §2.6 的织入覆盖不到它。
+开启后探针自己织入 `java.util.concurrent.ForkJoinTask` 的两个方法：
+
+| 织入点 | 执行线程 | 作用 |
+|---|---|---|
+| `fork()` | 提交线程 | `KeyBridge.markFork(this)` —— 当前线程有 key 才挂到任务上，无 key 直接返回 |
+| `doExec()` | ForkJoin 工作线程 | 入口 `forkEnter(this)` 取出 key 设进本线程，所有出口 `forkExit(this)` 回退并清表 |
+
+任务与 key 的对应关系存在探针私有的 `ConcurrentHashMap` 里，**没有全局锁**；
+且只有「提交线程当前有 key」时才写表，普通应用线程开销为零。
+
+```bash
+-javaagent:...=outdir=coverage,streamkey=true
+```
+
+**实测（JDK 21，预热 commonPool 后 —— 即池线程早于 key 存在、继承不到 key 的真实情形）**：
+
+| | 工作线程看到的 key | 覆盖探针 |
+|---|---|---|
+| 不开 `streamkey` | `null` | 3 / 10 |
+| `streamkey=true` | `k1` | **8 / 10** |
+
+> 为什么默认关：`fork()` 是并行计算的热路径，多两条指令 + 一次哈希写入。
+> 不需要按请求细分时用 `autokey` 或 `cli setkey`（进程级 key，不依赖线程传递）即可零开销采到。
+
+### 2.8 跨进程 MQ 归属：`mqkey=true`（默认关闭）
+
+key 存在 ThreadLocal 里，跨 JVM 就断了。开启后由探针在 MQ 客户端层面完成注入与读回，
+**业务代码一行都不用改**（与 OpenTelemetry 把 trace context 写进 carrier 的做法一致）：
+
+| 端 | 织入点 | 载体 |
+|---|---|---|
+| Kafka 生产 | `KafkaProducer.send(ProducerRecord, Callback)` | record headers |
+| Kafka 消费 | `@KafkaListener` 方法 / `MessageListener` 实现 | ConsumerRecord headers |
+| RocketMQ 生产 | `DefaultMQProducer.send(Message)` | `putUserProperty` |
+| RocketMQ 消费 | `@RocketMQMessageListener` 类 / `MessageListenerConcurrently|Orderly` | Message property（批量取第一条） |
+| RabbitMQ 生产 | `ChannelN.basicPublish(...)` | BasicProperties headers |
+| RabbitMQ 消费 | `@RabbitListener` 方法 / `MessageListener` 实现 | Message headers |
+
+```bash
+-javaagent:...=outdir=coverage,mqkey=true,mqheader=X-Coverage-Key
+```
+
+约束与兜底：
+
+- 只写**标准扩展区**（headers / user property），不碰业务字段；对面不是 Java 或没挂探针时，
+  多出来的 header 会被直接忽略，对业务零影响；
+- 写不进去就静默放弃（如 Rabbit 的 props 为 null、headers 是不可变 map），
+  **绝不会为了塞 key 去改动消息的任何既有属性**，也不会让发消息失败；
+- 消费端读不到 key 就当作「本次不归属」，行为与没开 `mqkey` 完全一致；
+- 织入点全部按「类名 / 注解名 / 接口名」匹配，版本对不上就匹配不到 —— 安全降级，不会破坏目标类。
+
+> 为什么默认关：加消息头属于**改变目标系统的数据**，必须由使用方显式点头。
+
+### 2.9 兜底：`CoverageTracer`（只在自研队列等极少数场景需要）
+
+`headerkey` / `autokey` / `async` / `streamkey` / `mqkey` / `cli setkey` 覆盖了绝大多数场景，
+而且都**不需要业务代码配合**。剩下的唯一场景是：同进程内任务先进入**自研队列**（不走 JDK 提交入口），
+再由别的线程捞起执行 —— 探针无从知晓你们的队列在哪里，这时才需要在入队处包一层
+
+`CoverageTracer.start/begin/end` 仍保留（想在业务里显式划归属区间时可用），但它们**不是**使用前提。
 
 ---
 
@@ -322,9 +395,9 @@ keys --address 172.xx.xx.10 --port 6300
 # [xiaoxiao-jacoco-cli] no key collected yet on 172.xx.xx.10:6300
 #   ! agent 到目前为止【一个类都没有插桩】(classes instrumented=0)
 #     -> 根因：includes/excludes 没匹配上。includes 匹配的是【VM 类名】(com/foo/Bar)，
-#        不是 URL 路径（/web301/testWeb3）、不是模块名（web3Server）、不是包名简写。
-#     -> 该进程里已加载的类，包名样例：[com/remote3/web3/*]
-#        建议把 agent 参数改成 includes=com/remote3/web3/*
+#        不是 URL 路径（/web/testWeb）、不是模块名（webServer）、不是包名简写。
+#     -> 该进程里已加载的类，包名样例：[com/remote/web/*]
+#        建议把 agent 参数改成 includes=com/remote/web/*
 #     -> 改完必须重启被测应用才生效。
 ```
 
@@ -410,6 +483,33 @@ java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec --classfiles l
 - 这是 xiaoxiao-jacoco 的专有扩展（私有块 `0x44`/`0x23`）。官方 agent 不认识该块，会退化成一次普通 dump，
   此时命令会提示「agent 不支持 dumpclasses，请升级 xiaoxiao-jacoco-agent」。
 
+### 3.3.4 `setkey` —— 远程设定全局当前 key（**零改业务代码**的按 key 分离）
+
+不想改目标系统代码、又想按用例/批次分离覆盖率时用这个：归属判定发生在**进程级**，
+不依赖线程传递，所以 `parallelStream`、自研线程池这些「key 传不过去」的场景也能采到。
+
+```bash
+setkey --key <k> [--address <addr>] [--port <port>] [--retry <n>] [--quiet]
+setkey --clear [--address <addr>] [--port <port>]     # 清除全局 key
+```
+
+```bash
+# 典型：单实例 + 时间窗口式 A/B 分离（全程不用碰业务代码）
+java -jar xiaoxiao-jacoco-cli.jar setkey --key case-A --address 172.16.11.13 --port 6300
+#   ... 跑用例 A ...
+java -jar xiaoxiao-jacoco-cli.jar dump --key case-A --destfile coverage/case-A.exec --reset
+java -jar xiaoxiao-jacoco-cli.jar setkey --key case-B --address 172.16.11.13 --port 6300
+#   ... 跑用例 B ...
+java -jar xiaoxiao-jacoco-cli.jar dump --key case-B --destfile coverage/case-B.exec --reset
+java -jar xiaoxiao-jacoco-cli.jar setkey --clear --address 172.16.11.13 --port 6300
+```
+
+要点：
+- 全局 key 对**整个进程**生效，期间所有「没有线程 key」的覆盖都归到它。
+  **要真正并发地按请求/用例分离，请用 `headerkey`（也是零改代码）或业务侧 `CoverageTracer`。**
+- 线程级 key（请求头 / `CoverageTracer`）优先级**高于**全局 key，两者可以共存。
+- 这是私有扩展（块 `0x45`）。官方 agent 不认识，会退化成一次普通 dump。
+
 ### 3.4 `instrument` —— 离线插桩
 
 ```bash
@@ -461,9 +561,9 @@ java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --perkey \
 被测机上（**`address` 必须填被测机自己的 IP**，否则只绑回环，你连不上）：
 
 ```bash
-# includes 必须写【VM 类名】通配，写成 web3Server（模块名/URL 片段）会一个类都匹配不到
-java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.remote3.*,inclnolocationclasses=true,output=tcpserver,address=172.xx.xx.10,port=6300,headerkey=X-Coverage-Key \
-     -jar web3-1.0-SNAPSHOT.jar
+# includes 必须写【VM 类名】通配，写成 webServer（模块名/URL 片段）会一个类都匹配不到
+java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.remote.*,inclnolocationclasses=true,output=tcpserver,address=172.xx.xx.10,port=6300,headerkey=X-Coverage-Key \
+     -jar web-1.0-SNAPSHOT.jar
 ```
 
 > 拿不准包名就先 `includes=*` 起一次，`keys` 命令会把该进程里已加载类的包名样例和建议的
@@ -501,7 +601,7 @@ java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --classfiles /path/t
 
 ```bash
 java -javaagent:...=outdir=coverage,includes=com.foo,jmx=true -jar your-app.jar
-# jconsole 连上 -> org.jacoco:type=Runtime -> dump()
+# jconsole 连上 -> com.xiaoxiao.jacoco:type=Runtime -> dump()
 ```
 
 ### 4.4 冒烟验证（先确认探针能挂上）
@@ -544,7 +644,7 @@ java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec --classfiles l
 ## 五、跨构建增量：保留未改接口的覆盖率（方法级携带）
 
 默认按 `classId` 合并，**只能在「类的字节码没变」时**跨构建保留覆盖。若两个接口在同一个类里、
-其中一个被改（如 `Web3Controller` 的 `/login` 与 `/query`，改了 `/query`），整个类重编译、
+其中一个被改（如 `WebController` 的 `/login` 与 `/query`，改了 `/query`），整个类重编译、
 `classId` 变了 → 旧 build 里 `/login` 的探针在新 build 报告里被静默丢弃。
 
 解决：用**方法级 hash 携带**（不依赖 git），并在**探针层**做增量注入，最终报告仍是
@@ -572,65 +672,3 @@ java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage \
 因 methodHash 碰撞而跨类误携带。
 
 ---
-
-## 六、目录
-
-```
-xiaoxiao-jacoco/
-  pom.xml                         # parent，packaging=pom，管理依赖与插件版本
-  setup-m2.sh                     # 首次构建前把 lib/ 里的定制 jacoco/asm 装进 ~/.m2
-  lib/                            # asm 9.10.1 + jacoco core/report 定制版
-  xiaoxiao-jacoco-agent/
-    pom.xml                       # 依赖 asm + org.jacoco.core（不含 report），shade 成 fat agent
-    src/main/java/peruser/
-      PerUserAgent.java           # premain/agentmain 入口
-      Options.java                # 官方全部参数 + 扩展参数解析
-      AgentArgParser.java         # 支持双引号包裹的 k=v 解析
-      PerUserTransformer.java     # ClassFileTransformer：过滤 + 织入
-      InstrumenterFlow.java       # 复刻 JaCoCo 内部插桩流程
-      ThreadLocalProbeArrayStrategy.java / ThreadProbeStore.java
-      CoverageTracer.java         # 公共 API：begin/end 一个工作单元
-      RequestKeyHook.java / RequestKeyWeaver.java   # headerkey 请求头归属
-      CoverageStore.java          # 按 key 的 exec 读写/合并
-      IAgentOutput.java + FileOutput / NoneOutput / TcpServerOutput / TcpClientOutput / Outputs
-      JmxSupport.java / JacocoRuntime.java / JacocoRuntimeMBean.java
-  xiaoxiao-jacoco-cli/
-    pom.xml                       # 依赖 core + report + asm，Main-Class=peruser.cli.CommandLine
-    src/main/java/peruser/cli/
-      CommandLine.java            # 命令分发
-      CliArgs.java / CliUsageException.java
-      ReportCommand.java / MergeCommand.java / DumpCommand.java
-      InstrumentCommand.java / ClassInfoCommand.java / ExecInfoCommand.java / VersionCommand.java
-      AnalyzePaths.java           # exec/class/source 路径扫描
-      BaselineStore.java / BaselineReport.java / MethodHasher.java / MiniJson.java
-```
-
----
-
-## 七、适用与限制
-
-- **目标 JVM 需 Java 8+**（两个模块都以 `--release 8` 编译，class major version 52，已在 JDK 1.8 验证可挂载）。
-  若目标报 `UnsupportedClassVersionError`，说明用的是旧版 jar，重新 `mvn clean package` 即可。
-- 能用「双实例双 agent」时优先官方方案（更简单、零改造）。
-- 依赖 JaCoCo 0.8.15 内部包（`org.jacoco.core.internal.*`），随版本可能变动，升级需回归验证。
-- **异步（线程池 / @Async / CompletableFuture）**：`async=true`（默认）已覆盖 JDK 标准提交入口，
-  见 §2.6。仍不支持的是**并行流** `parallelStream`（走 `ForkJoinTask.fork`，不经过提交入口）
-  与**跨进程 / 跨线程队列转交**（MQ 消费者、任务落库再由别的线程捞起）—— 这类需要业务侧
-  在消费端重新 `CoverageTracer.begin(key)`。
-- **类加载隔离**：被插桩类在运行时需能看见 `peruser.ThreadProbeStore`（agent jar 由 `-javaagent`
-  机制加在**系统 classpath**，大多数应用 OK）。agent **只对 `peruserrt` 这个小包**调用
-  `appendToBootstrapClassLoaderSearch`（用于给 JDK 线程池织入 key 传递，该包自包含、无状态，
-  注入前后都只有一份）。但 `peruser.*` **故意不加** bootstrap 搜索：
-  被插桩的应用类（系统 / 应用类加载器，均向上委派到系统类加载器）解析 `peruser.*` 时，与 agent 用的是
-  **同一份** `ThreadProbeStore` 实例。一旦误加 bootstrap 搜索，bootstrap 里会再存在一份，应用类命中
-  bootstrap 副本而 agent 读系统 classpath 副本 → 探针写进一份、读出另一份 → 覆盖率全空（5 字节空 `.exec`）。
-  若目标用隔离类加载器（部分插件框架）导致应用类看不到 `peruser.*`，需另行把 agent jar 暴露给该加载器。
-- **asm 冲突**：两个 fat jar 都内嵌 asm 9.10.1。若目标应用自带不同 asm 版本且在同一 classpath，可能冲突；
-  把目标应用的 asm 对齐到 9.10.1 即可。
-- **性能**：每个被插桩类每次方法调用多一次 `ThreadProbeStore.getProbes`，高频路径有轻微开销；
-  用 `includes=` 限定只插桩关心的包可显著降低。
-- **`--classfiles` 一定要用磁盘上的原始（未插桩）class**（agent 只改内存运行时类，磁盘字节不变），
-  否则对不上探针 id。
-
----
-

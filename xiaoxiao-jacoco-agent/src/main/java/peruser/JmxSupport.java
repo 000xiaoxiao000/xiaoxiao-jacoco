@@ -16,7 +16,11 @@ final class JmxSupport {
     static void register(Options options, IAgentOutput output) {
         try {
             final MBeanServer server = ManagementFactory.getPlatformMBeanServer();
-            final ObjectName name = new ObjectName("org.jacoco:type=Runtime");
+            // 用探针自己的 MBean 名，不占用官方 JaCoCo 的 org.jacoco:type=Runtime：
+            // 目标系统若已挂了官方 jacoco agent，同名注册会（或覆盖）影响它 —— 那是探针在干扰目标系统。
+            // 注意别写成以 org.jacoco 开头的字面量：pom 里有 org.jacoco 的 shade 重定位，
+            // 会把常量池里的这类字符串一起改掉。
+            final ObjectName name = new ObjectName("com.xiaoxiao.jacoco:type=Runtime");
             if (server.isRegistered(name)) {
                 server.unregisterMBean(name);
             }

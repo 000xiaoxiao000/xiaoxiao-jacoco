@@ -66,8 +66,8 @@ public final class BaselineReport {
         //    对未变方法把基线覆盖行的探针置 true
         //
         // 注意：用 classId 直接从 store 取 ExecutionData，而不是用类名索引。
-        // 原因：exec 里记录的类名是「点号」形式（web3Server.controller.Web301Controller），
-        // 而 ClassReader.getClassName() 返回的是「斜杠」形式（web3Server/controller/Web301Controller），
+        // 原因：exec 里记录的类名是「点号」形式（webServer.controller.WebController），
+        // 而 ClassReader.getClassName() 返回的是「斜杠」形式（webServer/controller/WebController），
         // 按名索引会永远 miss，导致真实 exec 被误判为「无覆盖」而走合成分支、又因 classId 冲突被跳过。
         // 而 Analyzer 内部正是用 CRC64.classId(orig) 在 store 里查 ExecutionData，
         // 所以我们也用同一个 id 取，保证修改的是 Analyzer 将要读取的那一份探针数组。

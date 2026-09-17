@@ -27,6 +27,20 @@ public final class KeyBridge {
     /** 上一层 key，用于 begin/end 嵌套时正确回退。 */
     private static final InheritableThreadLocal<String> PREV = new InheritableThreadLocal<String>();
 
+    /**
+     * parallelStream 专用：ForkJoinTask 的 key 暂存表。
+     *
+     * <p>parallelStream 走 {@code ForkJoinTask.fork()}，不经过线程池的提交入口，
+     * 因此无法像普通线程池那样在提交时刻直接包装任务。这里在 fork()（提交线程）把 key 挂到
+     * task 对象上，在 doExec()（工作线程）取出并设进当前线程，执行完立刻移除。
+     *
+     * <p>只有【当前线程有 key】时才写入 —— 绝大多数应用线程没有 key，表永远是空的，
+     * 对目标系统零开销。任务执行完必然 remove，不会泄漏；异常取消的残留由 SIZE 上限兜底清理。
+     */
+    private static final java.util.Map<Object, String> TASK_KEYS =
+            new java.util.concurrent.ConcurrentHashMap<Object, String>(64);
+    private static final int TASK_KEYS_MAX = 20000;
+
     private KeyBridge() {
     }
 
@@ -91,5 +105,62 @@ public final class KeyBridge {
             return c;
         }
         return new KeyCallable(c, key);
+    }
+
+    // ===== parallelStream（ForkJoinTask.fork / doExec）专用 =====
+
+    /**
+     * 在【提交线程】调用（织入 ForkJoinTask.fork()）：把当前 key 挂到 task 上。
+     * 无 key 时直接返回，不写表、不加锁之外的任何开销。
+     */
+    public static void markFork(Object task) {
+        if (task == null) {
+            return;
+        }
+        final String key = KEY.get();
+        if (key == null) {
+            return;
+        }
+        if (TASK_KEYS.size() > TASK_KEYS_MAX) {
+            // 兜底：任务被取消而未执行时的残留，超阈值整体清一次，避免无界增长
+            TASK_KEYS.clear();
+        }
+        TASK_KEYS.put(task, key);
+    }
+
+    /**
+     * 在【工作线程】调用（织入 ForkJoinTask.doExec() 入口）：取出挂在该 task 上的 key 并设进当前线程。
+     * 没挂过 key 的任务什么也不做（工作线程保持原样，不会被上一次任务的 key 污染）。
+     */
+    public static void forkEnter(Object task) {
+        if (task == null) {
+            return;
+        }
+        final String key = TASK_KEYS.get(task);
+        if (key == null) {
+            return;
+        }
+        PREV.set(KEY.get());
+        KEY.set(key);
+    }
+
+    /**
+     * 在【工作线程】调用（织入 ForkJoinTask.doExec() 的所有出口）：回退 key 并清掉表里该 task 的记录。
+     * 与 {@link #forkEnter(Object)} 成对，只有真正设过 key 时才需要清理。
+     */
+    public static void forkExit(Object task) {
+        if (task == null) {
+            return;
+        }
+        if (TASK_KEYS.remove(task) == null) {
+            return;
+        }
+        String prev = PREV.get();
+        PREV.remove();
+        if (prev == null) {
+            KEY.remove();
+        } else {
+            KEY.set(prev);
+        }
     }
 }

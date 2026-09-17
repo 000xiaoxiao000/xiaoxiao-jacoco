@@ -182,6 +182,8 @@ final class TcpServerOutput implements IAgentOutput {
             final boolean[] listKeys = {false};
             final boolean[] wantStats = {false};
             final boolean[] wantClasses = {false};
+            final boolean[] wantSetKey = {false};
+            final String[] newGlobalKey = {null};
             final int[] statsLimit = {50};
 
             // 1) exec 头：RemoteControlWriter 构造时即写出，客户端读到的首块必须是 BLOCK_HEADER
@@ -210,6 +212,10 @@ final class TcpServerOutput implements IAgentOutput {
                                 return false;
                             case PerKeyProtocol.BLOCK_CMDCLASSES:            // 扩展：导出被插桩类原始字节码（无 payload）
                                 wantClasses[0] = true;
+                                return false;
+                            case PerKeyProtocol.BLOCK_CMDSETKEY:             // 扩展：设定全局当前 key（空串=清除）
+                                wantSetKey[0] = true;
+                                newGlobalKey[0] = in.readUTF();
                                 return false;
                             default:
                                 return super.readBlock(blocktype);
@@ -248,6 +254,21 @@ final class TcpServerOutput implements IAgentOutput {
                 System.out.println("[xiaoxiao-jacoco] tcpserver: dumpclasses to "
                         + s.getRemoteSocketAddress() + " (" + ClassCache.size() + " classes, "
                         + (ClassCache.byteCount() / 1024) + " KB)");
+                return;
+            }
+
+            // 3.3) 设定全局当前 key（`cli setkey` 命令）—— 进程外驱动，零改业务代码
+            if (wantSetKey[0]) {
+                final String k = newGlobalKey[0];
+                if (k == null || k.isEmpty()) {
+                    ThreadProbeStore.clearCurrentKey();
+                } else {
+                    ThreadProbeStore.setCurrentKey(k);
+                }
+                writer.sendCmdOk();
+                writer.flush();
+                System.out.println("[xiaoxiao-jacoco] tcpserver: set global key to '"
+                        + (k == null || k.isEmpty() ? "<none>" : k) + "' by " + s.getRemoteSocketAddress());
                 return;
             }
 

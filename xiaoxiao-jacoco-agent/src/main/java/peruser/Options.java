@@ -35,6 +35,16 @@ import java.util.Map;
  *   autokey=KEY                冒烟模式：所有线程合并进单一 KEY（零代码改动），默认 KEY=default
  *   headerkey=NAME             按 HTTP 请求头 NAME 归属（如 X-Coverage-Key），框架无关、并发安全
  *   cleanup=24h                过期定期清理 outdir 下的旧 exec/class 文件（30m/2h/1d，纯数字按小时）
+ *   streamkey=true|false       parallelStream 的 key 传递（织入 ForkJoinTask），默认 false
+ *   mqkey=true|false           跨进程 MQ 的 key 透传（Kafka/RocketMQ/RabbitMQ），默认 false
+ *   mqheader=NAME              MQ 透传用的 header / property 名，默认 X-Coverage-Key
+ *   classcachemax=MB           classcache 的字节上限（MB），默认 64；超过即停止缓存
+ *
+ * 【设计底线：探针适应目标系统，探针不影响目标系统】
+ *   1) 任何会让业务改代码的场景，都必须由探针织入解决（CoverageTracer 只是最后兜底，不是前提）；
+ *   2) 任何有运行时成本的能力（热路径织入、内存缓存、给消息加 header）默认关闭或可关，
+ *      且在没有 key 的线程上开销为零；
+ *   3) 探针自带的三方依赖（ASM / JaCoCo）全部重定位到私有包，绝不污染目标系统的 classpath。
  *
  * exec 文件名规则：
  *   - 未指定 destfile：&lt;outdir&gt;/&lt;前缀&gt;-&lt;key&gt;.exec（默认即 coverage/coverage-&lt;key&gt;.exec）
@@ -61,8 +71,12 @@ public final class Options {
     final String mergeKey;             // autokey 的目标 key
     final long cleanupExpireMs;        // 过期清理阈值毫秒（0=不启用）
     final boolean asyncPropagate;      // 异步（线程池/@Async/CompletableFuture）key 传递，默认开
+    final boolean streamPropagate;     // parallelStream（ForkJoinTask）key 传递，默认关（热路径）
+    final boolean mqKey;               // 跨进程 MQ 的 key 透传，默认关（会给消息加 header）
+    final String mqHeader;             // MQ 透传用的 header / property 名，默认 X-Coverage-Key
     final boolean debug;               // 打印插桩/归属明细，排障用
     final boolean classCache;          // 是否内存缓存被插桩类的原始字节（dumpclasses 用），默认开
+    final long classCacheMaxBytes;     // classcache 的字节上限（默认 64MB）
 
     private Options(AgentOptions ao, boolean destfileSet, Map<String, String> kv) {
         this.ao = ao;
@@ -108,13 +122,32 @@ public final class Options {
         this.cleanupExpireMs = cleanup;
 
         this.asyncPropagate = !"false".equalsIgnoreCase(String.valueOf(kv.get("async")));
+        this.streamPropagate = "true".equalsIgnoreCase(String.valueOf(kv.get("streamkey")));
+        this.mqKey = "true".equalsIgnoreCase(String.valueOf(kv.get("mqkey")));
+        String mh = emptyToNull(kv.get("mqheader"));
+        this.mqHeader = (mh != null) ? mh : MqKeyHook.DEFAULT_HEADER;
         this.debug = "true".equalsIgnoreCase(String.valueOf(kv.get("debug")));
         this.classCache = !"false".equalsIgnoreCase(String.valueOf(kv.get("classcache")));
+        this.classCacheMaxBytes = parseMegaBytes(kv.get("classcachemax"), 64);
+    }
+
+    /** 解析 MB 值；非法或未指定时用默认值。 */
+    private static long parseMegaBytes(String v, long defaultMb) {
+        if (v == null || v.trim().isEmpty()) {
+            return defaultMb * 1024L * 1024L;
+        }
+        try {
+            long mb = Long.parseLong(v.trim());
+            return (mb <= 0) ? defaultMb * 1024L * 1024L : mb * 1024L * 1024L;
+        } catch (NumberFormatException e) {
+            return defaultMb * 1024L * 1024L;
+        }
     }
 
     /** 由原生 driver 之外的 key（xiaoxiao/peruser 扩展参数） */
     private static final java.util.Set<String> EXTENSION_KEYS = new java.util.HashSet<>(java.util.Arrays.asList(
-            "outdir", "autokey", "headerkey", "cleanup", "async", "debug", "classcache"));
+            "outdir", "autokey", "headerkey", "cleanup", "async", "streamkey", "mqkey", "mqheader",
+            "debug", "classcache", "classcachemax"));
 
     /** 官方 JaCoCo agent 支持的全部参数（其余未知参数只告警、不报错，避免拖累启动脚本） */
     private static final java.util.Set<String> OFFICIAL_KEYS = new java.util.HashSet<>(java.util.Arrays.asList(
@@ -200,7 +233,7 @@ public final class Options {
         // ---- 布尔参数：必须是 true/false ----
         for (String boolKey : new String[]{AgentOptions.APPEND, AgentOptions.DUMPONEXIT,
                 AgentOptions.INCLBOOTSTRAPCLASSES, AgentOptions.INCLNOLOCATIONCLASSES, AgentOptions.JMX,
-                "async", "classcache"}) {
+                "async", "streamkey", "mqkey", "classcache"}) {
             String v = kv.get(boolKey);
             if (v != null && !"true".equalsIgnoreCase(v.trim()) && !"false".equalsIgnoreCase(v.trim())) {
                 throw new IllegalArgumentException(
@@ -344,7 +377,7 @@ public final class Options {
         for (String p : patterns.split(":")) {
             if (p.isEmpty()) continue;
             String pattern = p.replace('.', '/');
-            // 不含通配符时按「前缀」匹配，兼容旧习惯 includes=web3Server 而不必写 web3Server*
+            // 不含通配符时按「前缀」匹配，兼容旧习惯 includes=webServer 而不必写 web3Server*
             if (pattern.indexOf('*') < 0 && pattern.indexOf('?') < 0) {
                 pattern = pattern + "*";
             }
