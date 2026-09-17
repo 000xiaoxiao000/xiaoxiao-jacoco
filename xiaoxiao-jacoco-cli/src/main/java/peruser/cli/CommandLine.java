@@ -70,6 +70,9 @@ public final class CommandLine {
             case "dump":
                 DumpCommand.execute(rest);
                 break;
+            case "dumpclasses":
+                DumpClassesCommand.execute(rest);
+                break;
             case "instrument":
                 InstrumentCommand.execute(rest);
                 break;
@@ -105,6 +108,8 @@ public final class CommandLine {
             KeysCommand.usage();
         } else if ("stats".equals(cmd)) {
             StatsCommand.usage();
+        } else if ("dumpclasses".equals(cmd)) {
+            DumpClassesCommand.usage();
         } else {
             System.err.println("usage: " + usageLine(cmd));
         }
@@ -120,6 +125,8 @@ public final class CommandLine {
                 return "xiaoxiao-jacoco-cli keys [--address <address>] [--port <port>] [--retry <count>]";
             case "stats":
                 return "xiaoxiao-jacoco-cli stats [--address <address>] [--port <port>] [--limit <n>]";
+            case "dumpclasses":
+                return "xiaoxiao-jacoco-cli dumpclasses [--address <address>] [--port <port>] [--outdir <dir>] [--zip <file>]";
             case "instrument":
                 return "xiaoxiao-jacoco-cli instrument [<sourcefiles> ...] --dest <dir>";
             case "classinfo":
@@ -142,6 +149,7 @@ public final class CommandLine {
         System.out.println("  dump   [--address <addr>] [--port <port>] [--destfile <path>]   从 agent(tcpserver) 抓取 exec");
         System.out.println("  keys   [--address <addr>] [--port <port>]                        列出 agent 已采集的所有 key");
         System.out.println("  stats  [--address <addr>] [--port <port>] [--limit <n>]          查看插桩了什么/多少、各 key 采到多少");
+        System.out.println("  dumpclasses [--address <addr>] [--port <port>] [--outdir <dir>] [--zip <file>]   从 agent 内存拉回被插桩类的原始字节码");
         System.out.println("  instrument [<sourcefiles> ...] --dest <dir>               离线插桩 class/jar");
         System.out.println("  classinfo [<classlocations> ...]                          查看 class/jar 里的类与探针信息");
         System.out.println("  execinfo [<execfiles> ...]                                查看 exec 文件里的 session 与类信息");

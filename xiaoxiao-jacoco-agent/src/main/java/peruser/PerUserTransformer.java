@@ -73,6 +73,10 @@ public final class PerUserTransformer implements ClassFileTransformer {
         if (options.classDumpDir != null) {
             dumpOriginal(className, buf);
         }
+        // 缓存原始字节到内存（dumpclasses 命令用，免容器访问即可拿 classfiles 当报告分母）
+        if (options.classCache) {
+            ClassCache.put(className, buf);
+        }
         try {
             byte[] out = InstrumenterFlow.instrument(buf, className.replace('/', '.'));
             Diagnostics.classInstrumented(className);

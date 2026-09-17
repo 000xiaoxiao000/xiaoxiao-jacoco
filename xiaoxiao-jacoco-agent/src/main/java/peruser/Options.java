@@ -62,6 +62,7 @@ public final class Options {
     final long cleanupExpireMs;        // 过期清理阈值毫秒（0=不启用）
     final boolean asyncPropagate;      // 异步（线程池/@Async/CompletableFuture）key 传递，默认开
     final boolean debug;               // 打印插桩/归属明细，排障用
+    final boolean classCache;          // 是否内存缓存被插桩类的原始字节（dumpclasses 用），默认开
 
     private Options(AgentOptions ao, boolean destfileSet, Map<String, String> kv) {
         this.ao = ao;
@@ -108,11 +109,12 @@ public final class Options {
 
         this.asyncPropagate = !"false".equalsIgnoreCase(String.valueOf(kv.get("async")));
         this.debug = "true".equalsIgnoreCase(String.valueOf(kv.get("debug")));
+        this.classCache = !"false".equalsIgnoreCase(String.valueOf(kv.get("classcache")));
     }
 
     /** 由原生 driver 之外的 key（xiaoxiao/peruser 扩展参数） */
     private static final java.util.Set<String> EXTENSION_KEYS = new java.util.HashSet<>(java.util.Arrays.asList(
-            "outdir", "autokey", "headerkey", "cleanup", "async", "debug"));
+            "outdir", "autokey", "headerkey", "cleanup", "async", "debug", "classcache"));
 
     /** 官方 JaCoCo agent 支持的全部参数（其余未知参数只告警、不报错，避免拖累启动脚本） */
     private static final java.util.Set<String> OFFICIAL_KEYS = new java.util.HashSet<>(java.util.Arrays.asList(
@@ -198,7 +200,7 @@ public final class Options {
         // ---- 布尔参数：必须是 true/false ----
         for (String boolKey : new String[]{AgentOptions.APPEND, AgentOptions.DUMPONEXIT,
                 AgentOptions.INCLBOOTSTRAPCLASSES, AgentOptions.INCLNOLOCATIONCLASSES, AgentOptions.JMX,
-                "async"}) {
+                "async", "classcache"}) {
             String v = kv.get(boolKey);
             if (v != null && !"true".equalsIgnoreCase(v.trim()) && !"false".equalsIgnoreCase(v.trim())) {
                 throw new IllegalArgumentException(
@@ -260,6 +262,11 @@ public final class Options {
 
     public boolean inclNoLocationClasses() {
         return ao.getInclNoLocationClasses();
+    }
+
+    /** 是否缓存被插桩类的原始字节（dumpclasses 命令依赖），默认 true；false 则纯靠 classdumpdir / 构建产物。 */
+    public boolean classCache() {
+        return classCache;
     }
 
     @Override

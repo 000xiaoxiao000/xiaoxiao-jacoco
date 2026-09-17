@@ -30,6 +30,8 @@ final class RemoteDump {
     private static final byte BLOCK_KEYS = 0x21;
     private static final byte BLOCK_CMDSTATS = 0x43;
     private static final byte BLOCK_STATS = 0x22;
+    private static final byte BLOCK_CMDCLASSES = 0x44;
+    private static final byte BLOCK_CLASSES = 0x23;
 
     private static final int SO_TIMEOUT = 10_000;
 
@@ -59,6 +61,11 @@ final class RemoteDump {
             out.writeInt(limit);
             out.flush();
         }
+
+        void cmdClasses() throws IOException {
+            out.writeByte(BLOCK_CMDCLASSES);
+            out.flush();
+        }
     }
 
     /** 能识别 BLOCK_KEYS 响应的读入器（含运行期自检计数，老版本 agent 没有这些字段时 tolerant）。 */
@@ -71,6 +78,7 @@ final class RemoteDump {
         long requestsTagged = -1;
         long classesNoLocation = -1;
         final StatsReport stats = new StatsReport();
+        byte[] classesZip = null;     // dumpclasses 命令：被插桩类原始字节码的 zip 包
 
         CmdReader(InputStream in) throws IOException {
             super(in);
@@ -97,6 +105,13 @@ final class RemoteDump {
                     // 老版本 agent：没有自检字段，读到流尾，忽略即可
                     classesSeen = -1;
                 }
+                return false;
+            }
+            if (blocktype == BLOCK_CLASSES) {
+                final long size = in.readLong();
+                final byte[] buf = new byte[(int) size];
+                in.readFully(buf, 0, (int) size);
+                classesZip = buf;
                 return false;
             }
             if (blocktype == BLOCK_STATS) {
@@ -236,6 +251,26 @@ final class RemoteDump {
                 throw new IOException("Socket closed unexpectedly.");
             }
             return reader.stats;
+        } finally {
+            socket.close();
+        }
+    }
+
+    /** 取 agent 内存里被插桩类的原始字节码 zip 包（私有扩展，仅 xiaoxiao-jacoco-agent 支持）。 */
+    static byte[] fetchClasses(String address, int port, int retry, long retryDelay) throws IOException {
+        final Socket socket = connect(address, port, retry, retryDelay);
+        try {
+            socket.setSoTimeout(SO_TIMEOUT);
+            final CmdWriter writer = new CmdWriter(socket.getOutputStream());
+            final CmdReader reader = new CmdReader(socket.getInputStream());
+            writer.cmdClasses();
+            if (!reader.read()) {
+                throw new IOException("Socket closed unexpectedly.");
+            }
+            if (reader.classesZip == null) {
+                throw new IOException("agent 未返回 classes 数据（可能版本过旧不支持 dumpclasses，请升级 agent）");
+            }
+            return reader.classesZip;
         } finally {
             socket.close();
         }

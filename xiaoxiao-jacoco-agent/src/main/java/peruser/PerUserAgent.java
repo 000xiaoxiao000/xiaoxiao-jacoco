@@ -67,6 +67,10 @@ public final class PerUserAgent {
                 + "  inclbootstrapclasses=" + o.agentOptions().getInclBootstrapClasses()
                 + "（inclnolocationclasses 默认 false：没有 source location 的类会被跳过，"
                 + "Spring Boot 可执行 jar 通常需要显式设为 true）");
+        System.out.println("[xiaoxiao-jacoco] class cache: classcache=" + o.classCache()
+                + (o.classCache()
+                    ? "（被插桩类的原始字节留在内存，可用 cli dumpclasses 拉回，免 scp/镜像）"
+                    : "（关闭：dumpclasses 不可用，请用 classdumpdir 或构建产物 jar 当 classfiles）"));
         warnIncludes(o.agentOptions().getIncludes());
         startSelfCheck(o);
 

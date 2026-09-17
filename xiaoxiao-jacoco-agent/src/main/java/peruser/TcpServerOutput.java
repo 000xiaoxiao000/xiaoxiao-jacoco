@@ -181,6 +181,7 @@ final class TcpServerOutput implements IAgentOutput {
             final String[] key = {null};          // null = 所有 key 的并集
             final boolean[] listKeys = {false};
             final boolean[] wantStats = {false};
+            final boolean[] wantClasses = {false};
             final int[] statsLimit = {50};
 
             // 1) exec 头：RemoteControlWriter 构造时即写出，客户端读到的首块必须是 BLOCK_HEADER
@@ -206,6 +207,9 @@ final class TcpServerOutput implements IAgentOutput {
                             case PerKeyProtocol.BLOCK_CMDSTATS:              // 扩展：运行期概况
                                 wantStats[0] = true;
                                 statsLimit[0] = in.readInt();
+                                return false;
+                            case PerKeyProtocol.BLOCK_CMDCLASSES:            // 扩展：导出被插桩类原始字节码（无 payload）
+                                wantClasses[0] = true;
                                 return false;
                             default:
                                 return super.readBlock(blocktype);
@@ -233,6 +237,17 @@ final class TcpServerOutput implements IAgentOutput {
                 writer.sendStats(statsLimit[0]);
                 writer.sendCmdOk();
                 writer.flush();
+                return;
+            }
+
+            // 3.2) 回被插桩类的原始字节码 zip（`cli dumpclasses` 命令）
+            if (wantClasses[0]) {
+                writer.sendClasses();
+                writer.sendCmdOk();
+                writer.flush();
+                System.out.println("[xiaoxiao-jacoco] tcpserver: dumpclasses to "
+                        + s.getRemoteSocketAddress() + " (" + ClassCache.size() + " classes, "
+                        + (ClassCache.byteCount() / 1024) + " KB)");
                 return;
             }
 

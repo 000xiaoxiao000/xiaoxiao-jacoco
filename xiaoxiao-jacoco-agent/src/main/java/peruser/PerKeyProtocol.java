@@ -24,6 +24,10 @@ import java.util.Set;
  *   0x41 BLOCK_CMDKEYDUMP  客户端 -> 服务端：UTF key + boolean reset
  *   0x42 BLOCK_CMDKEYS     客户端 -> 服务端：无 payload，请求列出当前所有 key
  *   0x21 BLOCK_KEYS        服务端 -> 客户端：int count + count 个 UTF key
+ *   0x43 BLOCK_CMDSTATS    客户端 -> 服务端：int limit
+ *   0x22 BLOCK_STATS       服务端 -> 客户端：运行期概况
+ *   0x44 BLOCK_CMDCLASSES  客户端 -> 服务端：无 payload，请求导出被插桩类的原始字节码
+ *   0x23 BLOCK_CLASSES     服务端 -> 客户端：long zip 长度 + zip 字节（被插桩类原始字节）
  * </pre>
  */
 final class PerKeyProtocol {
@@ -37,11 +41,17 @@ final class PerKeyProtocol {
     /** 客户端 -> 服务端：请求运行期概况（插桩了哪些类、各 key 采到多少）。 */
     static final byte BLOCK_CMDSTATS = 0x43;
 
+    /** 客户端 -> 服务端：请求导出被插桩类的原始字节码（dumpclasses 命令）。 */
+    static final byte BLOCK_CMDCLASSES = 0x44;
+
     /** 服务端 -> 客户端：key 列表响应。 */
     static final byte BLOCK_KEYS = 0x21;
 
     /** 服务端 -> 客户端：运行期概况响应。 */
     static final byte BLOCK_STATS = 0x22;
+
+    /** 服务端 -> 客户端：被插桩类原始字节码的 zip 包响应。 */
+    static final byte BLOCK_CLASSES = 0x23;
 
     private PerKeyProtocol() {
     }
@@ -118,6 +128,18 @@ final class PerKeyProtocol {
                 out.writeInt(k.probes);
                 out.writeInt(k.covered);
             }
+            out.flush();
+        }
+
+        /**
+         * 回一份被插桩类的原始字节码 zip 包（供 cli dumpclasses 命令使用）。
+         * 先写 1 字节块类型，再写 8 字节 zip 字节长度，再写原始 zip 字节。
+         */
+        void sendClasses() throws IOException {
+            final byte[] zip = ClassCache.toZip();
+            out.writeByte(BLOCK_CLASSES);
+            out.writeLong(zip.length);
+            out.write(zip, 0, zip.length);
             out.flush();
         }
     }

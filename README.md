@@ -394,6 +394,33 @@ java -jar xiaoxiao-jacoco-cli.jar stats --address 172.16.11.13 --port 6300
 > `stats` 是 xiaoxiao-jacoco 私有块（0x43/0x22）。旧版 agent 不认识会退化成一次普通 dump，
 > 命令会提示「不支持 stats，请升级 agent」。
 
+### 3.3.3 `dumpclasses` —— 从运行中的 agent 拉回「被插桩类的原始字节码」（免 scp / 免镜像）
+
+docker / k8s 等环境**禁止 scp、不给被测机密码**，覆盖率报告的分母（classfiles）通常拿不到：
+`classdumpdir` 落在容器里本地读不到、构建产物 jar 在镜像仓库里不好拉。本命令走 agent 已有的
+tcpserver 通道（与 `dump`/`keys`/`stats` 同源），把 agent 内存里缓存的【原始（未插桩）字节码】
+打成 zip 流回本地，彻底免容器访问、免镜像访问。
+
+```bash
+dumpclasses [--address <addr>] [--port <port>] [--outdir <dir>] [--zip <file>] [--retry <n>] [--quiet]
+```
+
+```bash
+# 从被测机 agent 拉回 classfiles（解压到 ./libs，可直接当 report 的 --classfiles）
+java -jar xiaoxiao-jacoco-cli.jar dumpclasses --address 172.16.11.13 --port 6300 --outdir libs --zip libs.zip
+
+# 然后出报告（classfiles 指向解压目录）
+java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec --classfiles libs --html reports
+```
+
+要点：
+- **必须是原始（未插桩）字节码**：agent 在插桩前就把类字节码留在内存（默认开，可用 `classcache=false` 关闭），
+  JaCoCo 报告时用 `Analyzer` 自行重插桩对齐探针编号，所以缓存原始字节才能和 exec 对上。
+- 解压出的目录结构就是 `com/foo/Bar.class`，`report --classfiles <outdir>` 的 `AnalyzePaths` 会递归扫 `.class`，直接可用。
+- 内存有 256MB 上限保护，超限后停止缓存并告警（已缓存的部分仍可用）；超大应用建议改用构建产物 jar / `classdumpdir`。
+- 这是 xiaoxiao-jacoco 的专有扩展（私有块 `0x44`/`0x23`）。官方 agent 不认识该块，会退化成一次普通 dump，
+  此时命令会提示「agent 不支持 dumpclasses，请升级 xiaoxiao-jacoco-agent」。
+
 ### 3.4 `instrument` —— 离线插桩
 
 ```bash
@@ -494,6 +521,34 @@ java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,autokey=smoke,inc
 java -jar xiaoxiao-jacoco-cli.jar execinfo --execdir coverage     # 有探针数据说明挂上了
 ```
 
+### 4.5 docker / k8s：免 scp 拿 classfiles（dumpclasses）
+
+企业容器化部署通常**禁止 scp、不提供被测机 root 密码**，覆盖率报告的分母（classfiles）就成了老大难。
+传统两条路在容器里都走不通：
+
+- `classdumpdir` 落盘在容器内，本地 scp 不出来（且无 ssh 入口）；
+- 构建产物 jar 在镜像仓库，拉取要凭证、还常比运行版本「新/旧」对不上。
+
+本项目的 `dumpclasses` 命令绕开这两点：exec 早已能经 `tcpserver` 远程 dump（§3.3，不需进容器），
+classfiles 则直接由 agent 在内存里缓存原始字节、经同一条 tcp 通道流回 cli。
+
+```bash
+# 1) 挂 agent（output=tcpserver，classcache 默认开；注意 includes 不能用逗号分隔多个值，见 §8）
+java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.foo.* -jar your-app.jar
+
+# 2) 远程拉 exec（与容器无关，只需网络通 6300）
+java -jar xiaoxiao-jacoco-cli.jar dump --address 172.16.11.13 --port 6300 --destfile coverage/coverage-1.exec
+
+# 3) 远程拉 classfiles（同一通道，免 scp / 免镜像）
+java -jar xiaoxiao-jacoco-cli.jar dumpclasses --address 172.16.11.13 --port 6300 --outdir libs --zip libs.zip
+
+# 4) 本地出报告
+java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec --classfiles libs --html reports
+```
+
+适用前提：被测机 agent 是 `xiaoxiao-jacoco-agent` 且 `classcache` 未关（默认开）。
+若 classfiles 版本与运行实例不一致，报告会**静默**把该类覆盖归零（见 §7 限制），务必保证拉的是当前运行版本的字节码。
+
 ---
 
 ## 五、跨构建增量：保留未改接口的覆盖率（方法级携带）
@@ -586,28 +641,6 @@ xiaoxiao-jacoco/
   用 `includes=` 限定只插桩关心的包可显著降低。
 - **`--classfiles` 一定要用磁盘上的原始（未插桩）class**（agent 只改内存运行时类，磁盘字节不变），
   否则对不上探针 id。
-
----
-
-## 八、已知坑 / 排障
-
-| 现象 | 原因与处理 |
-|---|---|
-| `No enum constant ...OutputMode.xxx` | `output=` 写成了 IP/其它值。`output` 只能是 `file`/`tcpserver`/`tcpclient`/`none`，IP 用 `address=`、端口用 `port=` |
-| exec 只有 5 字节、覆盖率为 0 | 类加载隔离问题（见 §7），或 `includes` 没匹配到（`*` `?` 通配符，用 VM 类名 `com/foo/Bar`） |
-| `dump` 报 `Connection refused` | agent 不是 `output=tcpserver`；或 `address` 留空只绑了 `127.0.0.1`（跨机必须显式 `address=<被测机IP>` 或 `0.0.0.0`）；或防火墙没放行该端口 |
-| `dump` 报 `Socket closed unexpectedly` | 服务端没写 `CMDOK` 结束块；本项目已修复，旧版请重新打包 |
-| `execinfo` 报 `Unknown block type 20` | 读的是 `nc` 直连抓的裸流（含 `CMDOK` 尾块），请用 `dump` 命令抓取 |
-| 报告里源码不显示 | 没传 `--sourcefiles`，或源码路径与 class 的包结构对不上 |
-| `IllegalArgumentException: Unknown agent option` | 已修复：未知参数现在只告警不致命 |
-| `keys` 返回空 / `dump --key` 抓到 0 类 | **直接看 `keys` 的自检输出**（见 §3.3.1），它会区分「一个都没插桩 / 钩子没触发 / 头没读到」。最常见是 `includes` 写成 URL 路径或模块名（`web3Server`）→ 改成 VM 类名（`com/foo/*`），或先 `includes=*` 验证；Spring Boot 可执行 jar 再加 `inclnolocationclasses=true`。改完必须重启 |
-| `dump --key` 对官方 agent 报协议错 | `--key` 是私有扩展，只对 `xiaoxiao-jacoco-agent` 生效；对官方 agent 请去掉 `--key` |
-| `FileNotFoundException: <path> (No such file or directory)` | `--destfile` 的父目录没写权限（如 `/coverage` 需要 root）。新版会明确提示「无法创建输出目录 ...」；换有权限的目录或先 `mkdir -p` |
-| `dump` 不认 `--execdir` | 该参数已移除（只属于 `report`）。`dump` 统一用 `--destfile <路径>`；传了会打印 `warning: 忽略未知选项 --execdir` |
-| 拼错 / 用错选项却毫无反应 | 新版 `dump` / `keys` 会对未知选项打 warning；看到就说明该选项没生效 |
-| 异步（@Async / 线程池）里的代码没覆盖 | 先确认日志有 `async=on(...)`；少数 JVM 不允许重定义 `java.util.concurrent.*`，启动日志会打 `async retransform skipped`，此时改用 `async=false` 并在业务侧手动 `CoverageTracer.wrap(task)` |
-| 启动报 `LinkageError: ... duplicate class definition` | agent 自身类被 transformer 递归拦截；新版已跳过 `peruser/`、`peruserrt/`、`org/jacoco/`、`org/objectweb/`，请重新打包 |
-| 启动报 `Sharing is only supported for boot loader classes` | 只是 JDK 的 CDS 警告（因为往 bootstrap 追加了 `peruserrt`），不影响功能；在意就加 `-Xshare:off` 或 `async=false` |
 
 ---
 
