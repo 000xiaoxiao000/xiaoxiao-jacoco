@@ -357,6 +357,8 @@ public final class Options {
     private List<WildcardMatcher> joinExcludes(String userExcludes) {
         List<WildcardMatcher> list = new ArrayList<>();
         for (String p : Arrays.asList("peruser/*", "org/jacoco/*", "org/objectweb/asm/*",
+                // shaded 进来的 ASM（pom.xml 重定位后的私有包），同样禁止被插桩
+                "com/xiaoxiao/jacoco/shaded/*",
                 "java/*", "javax/*", "jdk/*", "sun/*", "com/sun/*")) {
             list.add(new WildcardMatcher(p));
         }

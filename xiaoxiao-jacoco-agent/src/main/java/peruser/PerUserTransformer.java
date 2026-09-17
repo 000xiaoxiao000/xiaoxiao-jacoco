@@ -103,7 +103,8 @@ public final class PerUserTransformer implements ClassFileTransformer {
                 || className.startsWith("sun/") || className.startsWith("com/sun/")
                 || className.startsWith("org/springframework/") || className.startsWith("ch/qos/")
                 || className.startsWith("org/apache/") || className.startsWith("io/netty/")
-                || className.startsWith("org/objectweb/") || className.startsWith("org/jacoco/"));
+                || className.startsWith("org/objectweb/") || className.startsWith("org/jacoco/")
+                || className.startsWith("com/xiaoxiao/jacoco/shaded/"));
     }
 
     /** 没有 source location（CodeSource / location 为空）的类，JaCoCo 默认跳过。 */
@@ -120,7 +121,10 @@ public final class PerUserTransformer implements ClassFileTransformer {
         return className.startsWith("peruser/")
                 || className.startsWith("peruserrt/")
                 || className.startsWith("org/jacoco/")
-                || className.startsWith("org/objectweb/");
+                || className.startsWith("org/objectweb/")
+                // shaded 进来的 ASM 已被 pom.xml 重定位成 com.xiaoxiao.jacoco.shaded.asm.*，
+                // 必须一并排除，否则 agent 会去插桩自己的 ASM（递归加载）
+                || className.startsWith("com/xiaoxiao/jacoco/shaded/");
     }
 
     private void dumpOriginal(String className, byte[] buf) {

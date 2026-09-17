@@ -67,6 +67,19 @@
                                     </excludes>
                                 </filter>
                             </filters>
+                            <!-- 关键：把 ASM 重定位到私有包，避免污染目标应用。
+                                 -javaagent 的 jar 会被挂到目标应用的 system classpath 上，
+                                 若裸打包 org.objectweb.asm，就会与应用自带的 ASM（任意版本）撞车。
+                                 重定位后探针自带一份私有 ASM，与应用完全隔离
+                                 —— 是【探针适应目标系统】，而不是让目标系统来适配探针。
+                                 注意：改名后必须同步 PerUserTransformer.isAgentInternal /
+                                 Options.joinExcludes 里的包名白名单，否则 agent 会去插桩自己的 ASM。 -->
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.objectweb.asm</pattern>
+                                    <shadedPattern>com.xiaoxiao.jacoco.shaded.asm</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <manifestEntries>

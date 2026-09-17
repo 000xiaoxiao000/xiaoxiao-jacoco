@@ -73,6 +73,14 @@
                                     </excludes>
                                 </filter>
                             </filters>
+                            <!-- 与 agent 一致：ASM 重定位到私有包，避免与同 classpath 上的其他 ASM 版本冲突。
+                                 （cli 是 java -jar 独立运行，冲突风险低于 agent，但保持一致更安全） -->
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.objectweb.asm</pattern>
+                                    <shadedPattern>com.xiaoxiao.jacoco.shaded.asm</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <manifestEntries>
