@@ -80,8 +80,8 @@ java -jar xiaoxiao-jacoco-cli.jar report \
      --html reports
 ```
 
-`reports/<key>/index.html` 每个 key 一份，格式与官方 `jacococli report` 完全一致。
-加 `--merge` 额外出一份全员并集 `reports/all/index.html`。
+`--execdir coverage` 默认把该目录下所有 `*.exec` **合并成一份**报告（原生并集）；加 `--perkey` 才按每个 key 拆成 `reports/<key>/index.html` 多份，格式与官方 `jacococli report` 完全一致。
+加 `--merge` 额外出一份全员并集 `reports/all/index.html`。`--html`/`--xml`/`--csv` 任选其一或组合。
 
 ---
 
@@ -230,11 +230,19 @@ report [<execfiles> ...] --classfiles <path> [--classfiles <path> ...] \
 
 | 参数 | 说明 |
 |---|---|
-| `--execdir <dir>` | 读该目录下所有 `*.exec`，按文件名里的 `<key>` 逐个出报告 |
-| `--perkey` | 显式按 key 拆分（默认在 execdir 模式下自动开启） |
-| `--merge` | 额外出一份所有 key 的并集报告 `all/` |
+| `--execdir <dir>` | 收集该目录下所有 `*.exec`，**默认合并成一份**报告（与原生多 exec 并集一致） |
+| `--perkey` | 显式按 key 拆分（默认**关闭**；key 取自文件名 `coverage-<key>.exec` 的 `<key>` 段） |
+| `--merge` | 额外出一份所有 exec 的并集报告 `all/` |
 | `--baseline-out <json>` | 采集方法级基线（跨构建增量用，见 §5） |
 | `--baseline <json>` | 用基线做「方法级携带」，生成增量对比报告 |
+
+> **原生格式独立开关**：`--html` / `--xml` / `--csv` 三者相互独立，只生成你指定的格式（与原生 `jacococli report` 一致）。
+> **报告文件名按输入 exec 命名**：`--xml <dir>` / `--csv <dir>` 传【目录】时，文件名默认 = 输入 exec 的文件名（去掉 `.exec`）：
+> - 单文件 `report coverage-1.exec --xml reports` → `reports/coverage-1.xml`（覆盖全 0 也照样按此命名）
+> - `--perkey` 下每份按各自 exec 文件名：`coverage-1.xml` / `coverage-2.xml`（HTML 子目录同名 `coverage-1/`）
+> - 多 exec 合并（不加 `--perkey`）→ `reports/jacoco.xml` / `jacoco.csv`
+> - `--merge` 的额外汇集报告 → `reports/all.xml` / `all.csv`
+> - 显式传 `.xml` / `.csv` 文件（如 `--xml reports/jacoco.xml`）则原样，不受上述规则影响。
 
 兼容旧写法：不带命令名、直接以 `--execdir` 开头时等价于 `report`。
 
@@ -442,9 +450,10 @@ curl -H "X-Coverage-Key: user-A" http://host/api/xxx
 curl -H "X-Coverage-Key: user-B" http://host/api/xxx
 
 # 跑完一次 dump，两个 key 各出一份（合并写：中途再 dump 也不会覆盖，只会累加）
-java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage \
+java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --perkey \
      --classfiles /path/to/classes --sourcefiles /path/to/src --html reports
 # -> reports/user-A/index.html   reports/user-B/index.html
+# 不加 --perkey 时默认合并成一份 reports/index.html
 ```
 
 ### 4.2 长跑服务：tcpserver + 跨机抓取（本机 192.168.6.130 ← 被测机 172.xx.xx.10）

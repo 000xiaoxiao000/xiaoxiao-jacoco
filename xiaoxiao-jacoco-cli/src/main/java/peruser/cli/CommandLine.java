@@ -160,17 +160,17 @@ public final class CommandLine {
         System.out.println("  --classfiles <path>     原始 class 目录 / jar（可重复传参）");
         System.out.println("  --sourcefiles <path>    源码根目录（可重复传参），用于渲染源码");
         System.out.println("  --html <dir>            HTML 报告输出目录");
-        System.out.println("  --xml <file>            XML 报告输出文件");
-        System.out.println("  --csv <file>            CSV 报告输出文件");
+        System.out.println("  --xml <file>            XML 报告（原生 JaCoCo 格式）；传目录则写 <dir>/jacoco.xml");
+        System.out.println("  --csv <file>            CSV 报告（原生 JaCoCo 格式）；传目录则写 <dir>/jacoco.csv");
         System.out.println("  --encoding <charset>    源码/输出编码，默认 UTF-8");
         System.out.println("  --name <name>           bundle 名称，默认 xiaoxiao-jacoco");
         System.out.println("  --tabwidth <n>          制表符宽度，默认 4");
         System.out.println("  --quiet                 减少输出");
         System.out.println();
-        System.out.println("report 扩展（按 key 分离，xiaoxiao-jacoco 专有）:");
-        System.out.println("  --execdir <dir>         读该目录下所有 coverage-<key>.exec（缺省当前目录）");
-        System.out.println("  --perkey                每个 key 一份报告（用 --execdir 时默认开启）");
-        System.out.println("  --merge                 所有 exec 按 classId OR 合并出一份并集报告");
+        System.out.println("report 扩展（xiaoxiao-jacoco 专有）:");
+        System.out.println("  --execdir <dir>         收集该目录下所有 *.exec，默认【合并成一份】报告（原生并集）");
+        System.out.println("  --perkey                每个 key 一份报告（需显式开启；key 取自文件名 <key> 段）");
+        System.out.println("  --merge                 所有 exec 按 classId OR 合并，额外出一份 all/ 并集报告");
         System.out.println("  --baseline-out <file>   采集方法级基线 JSON（Build N 跑完后）");
         System.out.println("  --baseline <file>       携带基线（Build N+1），回填未变方法的覆盖");
         System.out.println();
@@ -183,7 +183,7 @@ public final class CommandLine {
         System.out.println("  java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec \\");
         System.out.println("       --classfiles target/classes --sourcefiles src/main/java --html reports");
         System.out.println("  java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --classfiles target/classes \\");
-        System.out.println("       --sourcefiles src/main/java --html reports       # 每个 key 一份");
+        System.out.println("       --sourcefiles src/main/java --xml reports       # 合并成一份 jacoco.xml");
     }
 
     /** 是否静默输出（--quiet）。 */

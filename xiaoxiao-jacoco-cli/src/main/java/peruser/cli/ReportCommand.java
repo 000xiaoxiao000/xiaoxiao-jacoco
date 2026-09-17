@@ -2,13 +2,11 @@ package peruser.cli;
 
 import org.jacoco.core.analysis.Analyzer;
 import org.jacoco.core.analysis.CoverageBuilder;
-import org.jacoco.core.data.ExecutionData;
 import org.jacoco.core.data.ExecutionDataStore;
 import org.jacoco.core.data.SessionInfoStore;
 import org.jacoco.core.tools.ExecFileLoader;
 import org.jacoco.report.DirectorySourceFileLocator;
 import org.jacoco.report.FileMultiReportOutput;
-import org.jacoco.report.IMultiReportOutput;
 import org.jacoco.report.IReportVisitor;
 import org.jacoco.report.ISourceFileLocator;
 import org.jacoco.report.MultiReportVisitor;
@@ -20,26 +18,32 @@ import org.jacoco.report.xml.XMLFormatter;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.PrintStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
 /**
- * report 命令：读 exec 文件 + 原始 classfiles，产出 HTML / XML / CSV 报告（官方 jacococli report 的全部参数），
- * 并支持 xiaoxiao-jacoco 专有的「按 key 出报告」与「基线」能力。
+ * report 命令：读 exec 文件 + 原始 classfiles，产出覆盖率报告。
+ *
+ * 支持官方 jacococli report 的【全部原生格式】，且每种格式相互独立、按需生成：
+ *   --html <dir>   HTML 报告（原生 jacococli 完全一致的结构，含 index.html + 各类页）
+ *   --xml  <file>  XML 报告（原生 JaCoCo report.dtd 格式，可被 SonarQube / Jenkins 插件等直接消费）
+ *   --csv  <file>  CSV 报告（原生 JaCoCo 列格式）
+ *
+ * 与原生差异点（xiaoxiao-jacoco 扩展）：
+ *   --execdir <dir>   读该目录下所有 *.exec，默认【合并成一份】报告（与原生多 exec 并集一致）；
+ *                      想按 key 拆分出多份报告需显式加 --perkey。
+ *   --perkey          每个 key 一份报告（按各自 exec 文件名命名，如 coverage-1.exec -> coverage-1.xml）
+ *   --merge           所有 exec 按 classId OR 合并，额外出一份 all/ 并集报告
+ *   报告文件名：--xml/--csv 传【目录】时，单文件默认按输入 exec 文件名命名（coverage-1.exec -> coverage-1.xml；
+ *              --perkey 下每份按各自 exec 文件名；多 exec 合并（无 perkey）用 jacoco.xml）。显式传 .xml/.csv 文件则原样。
+ *   --baseline-out/-in 方法级基线采集 / 增量携带（仅影响 HTML）
  *
  * 官方用法：
- *   report [<execfiles> ...] --classfiles <path> [--sourcefiles <path>] [--html <dir>]
- *          [--xml <file>] [--csv <file>] [--encoding <charset>] [--name <name>] [--tabwidth <n>] [--quiet]
- *
- * 扩展用法（按 key 出报告 / 基线）：
- *   report --execdir <dir> --classfiles <path> [--sourcefiles <path>] [--html <dir>]
- *          [--perkey] [--merge] [--baseline-out <file> | --baseline <file>]
+ *   report [<execfiles> ...] --classfiles <path> [--classfiles <path> ...]
+ *          [--sourcefiles <path> ...] [--html <dir>] [--xml <file>] [--csv <file>]
+ *          [--encoding <enc>] [--name <name>] [--tabwidth <n>] [--quiet]
  */
 public final class ReportCommand {
 
@@ -72,9 +76,11 @@ public final class ReportCommand {
             execFiles.addAll(findExecs(new File(dir)));
         }
 
-        final String html = CliArgs.value(args, "html", null);
-        final String xml = CliArgs.value(args, "xml", null);
-        final String csv = CliArgs.value(args, "csv", null);
+        // ----- 各原生格式独立解析 -----
+        // xmlArg/csvArg 保留原始参数；最终文件名在调用点按「输入 exec 文件名」派生（目录 -> <dir>/<base>.<ext>）
+        final String htmlDir = CliArgs.value(args, "html", null);
+        final String xmlArg = CliArgs.value(args, "xml", null);
+        final String csvArg = CliArgs.value(args, "csv", null);
         final String baselineOut = CliArgs.value(args, "baseline-out", null);
         final String baselineIn = CliArgs.value(args, "baseline", null);
 
@@ -84,12 +90,15 @@ public final class ReportCommand {
         if (classPaths.isEmpty()) {
             throw new CliUsageException("missing --classfiles <path>");
         }
+        // 原生行为：至少指定一种输出格式
+        if (htmlDir == null && xmlArg == null && csvArg == null && baselineOut == null) {
+            throw new CliUsageException("at least one output format must be specified: "
+                    + "--html <dir> / --xml <file> / --csv <file>");
+        }
 
-        final boolean perkey = CliArgs.has(args, "perkey") || !execDirs.isEmpty();
+        // perkey 默认关闭（与原生一致）；仅 --execdir 收集文件、默认合并成一份；显式 --perkey 才拆分
+        final boolean perkey = CliArgs.has(args, "perkey");
         final boolean merge = CliArgs.has(args, "merge");
-
-        // 输出目录：--html 指定；未指定时默认 reports
-        final String baseOut = (html != null) ? html : "reports";
 
         // ===== 1) 采集基线 =====
         if (baselineOut != null) {
@@ -108,17 +117,14 @@ public final class ReportCommand {
         if (merge) {
             final ExecFileLoader loader = loadExecFiles(execFiles, quiet);
             final ExecutionDataStore store = loader.getExecutionDataStore();
-            final File dir = new File(baseOut, "all");
+            final File htmlAll = htmlDir != null ? new File(htmlDir, "all") : null;
             if (baselineIn != null) {
                 BaselineReport.generate(store, classPaths, sourcePaths,
-                        BaselineStore.read(new File(baselineIn)), dir, "all");
+                        BaselineStore.read(new File(baselineIn)), dirOrNull(htmlAll, "all"), "all");
             } else {
                 writeReport(store, loader.getSessionInfoStore(), classPaths, sourcePaths,
-                        dir, xmlOf(baseOut, "all", xml), csvOf(baseOut, "all", csv),
-                        "all", encoding, tabWidth, quiet);
-            }
-            if (!quiet) {
-                System.out.println("[xiaoxiao-jacoco-cli] merged report -> " + dir.getAbsolutePath() + "/index.html");
+                        htmlAll, resolveReportFile(xmlArg, ".xml", "all"), resolveReportFile(csvArg, ".csv", "all"),
+                        "all", encoding, tabWidth, quiet, "merge");
             }
             // --merge 是【额外的】并集报告：多 key 时继续往下出每个 key 各自的报告
             if (!(perkey && execFiles.size() > 1)) {
@@ -126,63 +132,63 @@ public final class ReportCommand {
             }
         }
 
-        // ===== 3) 按 key / 单份报告 =====
+        // ===== 3) 按 key / 按文件拆分报告（每 exec 一份，文件名 = exec 文件名） =====
         if (perkey && execFiles.size() > 1) {
             for (File exec : execFiles) {
-                final String key = keyOf(exec);
+                final String stem = stemOf(exec);
                 final ExecFileLoader loader = new ExecFileLoader();
                 loader.load(exec);
                 final ExecutionDataStore store = loader.getExecutionDataStore();
-                final File dir = new File(baseOut, key);
+                final File htmlKeyDir = htmlDir != null ? new File(htmlDir, stem) : null;
                 if (baselineIn != null) {
                     BaselineReport.generate(store, classPaths, sourcePaths,
-                            BaselineStore.read(new File(baselineIn)), dir, key);
+                            BaselineStore.read(new File(baselineIn)), dirOrNull(htmlKeyDir, stem), stem);
                 } else {
                     writeReport(store, loader.getSessionInfoStore(), classPaths, sourcePaths,
-                            dir, xmlOf(baseOut, key, xml), csvOf(baseOut, key, csv),
-                            name, encoding, tabWidth, quiet);
-                }
-                if (!quiet) {
-                    System.out.println("[xiaoxiao-jacoco-cli] key=" + key + " -> " + dir.getAbsolutePath() + "/index.html");
+                            htmlKeyDir,
+                            resolveReportFile(xmlArg, ".xml", stem),
+                            resolveReportFile(csvArg, ".csv", stem),
+                            stem, encoding, tabWidth, quiet, "exec=" + exec.getName());
                 }
             }
             return;
         }
 
-        // 单个 exec（或官方默认：多个 exec 合并成一份）
+        // 单个 exec（或官方默认：多个 exec 合并成一份并集报告）
         final ExecFileLoader loader = loadExecFiles(execFiles, quiet);
-        final String key = (execFiles.size() == 1) ? keyOf(execFiles.get(0)) : name;
-        final File dir = new File(baseOut, perkey ? key : "");
+        // 目录型 --xml/--csv 文件名默认 = 输入 exec 文件名（去掉 .exec）；多 exec 合并（无 perkey）则用 jacoco
+        final String singleBase = (execFiles.size() == 1) ? stemOf(execFiles.get(0)) : "jacoco";
+        final File htmlUse = htmlDir != null ? new File(htmlDir) : null;
         if (baselineIn != null) {
             BaselineReport.generate(loader.getExecutionDataStore(), classPaths, sourcePaths,
-                    BaselineStore.read(new File(baselineIn)), dir, key);
+                    BaselineStore.read(new File(baselineIn)), dirOrNull(htmlUse, singleBase), singleBase);
         } else {
             writeReport(loader.getExecutionDataStore(), loader.getSessionInfoStore(), classPaths, sourcePaths,
-                    dir, xml, csv, key, encoding, tabWidth, quiet);
-        }
-        if (!quiet) {
-            System.out.println("[xiaoxiao-jacoco-cli] report -> " + dir.getAbsolutePath() + "/index.html");
+                    htmlUse,
+                    resolveReportFile(xmlArg, ".xml", singleBase),
+                    resolveReportFile(csvArg, ".csv", singleBase),
+                    name, encoding, tabWidth, quiet, "report");
         }
     }
 
     static void usage() {
         System.out.println("Usage: java -jar xiaoxiao-jacoco-cli.jar report [<execfiles> ...] --classfiles <path> [options]");
         System.out.println();
-        System.out.println("Options (JaCoCo official):");
+        System.out.println("Output formats (native JaCoCo, each independent — specify only what you need):");
+        System.out.println("  --html <dir>            HTML 报告输出目录（原生 jacococli 结构）");
+        System.out.println("  --xml <file>            XML 报告；传【目录】则写入 <dir>/<exec名>.xml（按输入 exec 文件名命名）");
+        System.out.println("  --csv <file>            CSV 报告；传【目录】则写入 <dir>/<exec名>.csv（按输入 exec 文件名命名）");
         System.out.println("  --classfiles <path>     原始 class 目录 / jar（可重复传参）");
         System.out.println("  --sourcefiles <path>    源码根目录（可重复传参）");
-        System.out.println("  --html <dir>            HTML 报告输出目录");
-        System.out.println("  --xml <file>            XML 报告输出文件");
-        System.out.println("  --csv <file>            CSV 报告输出文件");
         System.out.println("  --encoding <charset>    源码 / 输出编码，默认 UTF-8");
         System.out.println("  --name <name>           bundle 名称，默认 xiaoxiao-jacoco");
         System.out.println("  --tabwidth <n>          制表符宽度，默认 4");
         System.out.println("  --quiet                 减少输出");
         System.out.println();
         System.out.println("Options (xiaoxiao-jacoco extension):");
-        System.out.println("  --execdir <dir>         读该目录下所有 coverage-<key>.exec");
+        System.out.println("  --execdir <dir>         收集该目录下所有 *.exec，默认合并成一份报告（原生并集）");
         System.out.println("  --perkey                每个 key 一份报告（使用 --execdir 时默认开启）");
-        System.out.println("  --merge                 所有 exec 按 classId OR 合并出一份并集报告");
+        System.out.println("  --merge                 所有 exec 按 classId OR 合并，额外出一份 all/ 并集报告");
         System.out.println("  --baseline-out <file>   采集方法级基线 JSON");
         System.out.println("  --baseline <file>       携带基线，回填未变方法的覆盖");
     }
@@ -200,11 +206,15 @@ public final class ReportCommand {
         return loader;
     }
 
-    /** 生成（HTML 必Always + 可选 XML/CSV）reportDir 下的报告。 */
+    /**
+     * 生成报告。HTML 仅在 htmlDir != null 时产出；XML/CSV 仅在对应文件 != null 时产出。
+     * 三种格式都交给原生 JaCoCo Formatter，因此输出与官方 jacococli report 完全一致。
+     */
     private static void writeReport(ExecutionDataStore store, SessionInfoStore sessions,
                                     List<String> classPaths, List<String> sourcePaths,
-                                    File reportDir, String xmlFile, String csvFile,
-                                    String name, String encoding, int tabWidth, boolean quiet) throws IOException {
+                                    File htmlDir, String xmlFile, String csvFile,
+                                    String bundleName, String encoding, int tabWidth, boolean quiet,
+                                    String label) throws IOException {
         final CoverageBuilder builder = new CoverageBuilder();
         final Analyzer analyzer = new Analyzer(store, builder);
         for (String cp : classPaths) {
@@ -215,15 +225,16 @@ public final class ReportCommand {
             }
             AnalyzePaths.analyzePathInto(analyzer, f);
         }
-        reportDir.mkdirs();
 
         final List<IReportVisitor> visitors = new ArrayList<>();
         final List<OutputStream> outputs = new ArrayList<>();
         try {
-            final HTMLFormatter html = new HTMLFormatter();
-            html.setOutputEncoding(encoding);
-            visitors.add(html.createVisitor(new FileMultiReportOutput(reportDir)));
-
+            if (htmlDir != null) {
+                htmlDir.mkdirs();
+                final HTMLFormatter html = new HTMLFormatter();
+                html.setOutputEncoding(encoding);
+                visitors.add(html.createVisitor(new FileMultiReportOutput(htmlDir)));
+            }
             if (xmlFile != null) {
                 File xf = new File(xmlFile);
                 mkdirsForFile(xf);
@@ -245,7 +256,7 @@ public final class ReportCommand {
 
             final IReportVisitor visitor = new MultiReportVisitor(visitors);
             visitor.visitInfo(sessions.getInfos(), store.getContents());
-            visitor.visitBundle(builder.getBundle(name), sourceLocator(sourcePaths, encoding, tabWidth));
+            visitor.visitBundle(builder.getBundle(bundleName), sourceLocator(sourcePaths, encoding, tabWidth));
             visitor.visitEnd();
         } finally {
             for (OutputStream os : outputs) {
@@ -258,7 +269,12 @@ public final class ReportCommand {
         }
 
         if (!quiet) {
-            System.out.println("[xiaoxiao-jacoco-cli] analyzed classes=" + builder.getClasses().size());
+            final StringBuilder msg = new StringBuilder("[xiaoxiao-jacoco-cli] " + label
+                    + " analyzed classes=" + builder.getClasses().size());
+            if (htmlDir != null) msg.append("; html=").append(htmlDir.getAbsolutePath());
+            if (xmlFile != null) msg.append("; xml=").append(xmlFile);
+            if (csvFile != null) msg.append("; csv=").append(csvFile);
+            System.out.println(msg);
         }
     }
 
@@ -329,21 +345,34 @@ public final class ReportCommand {
         return dash >= 0 ? n.substring(dash + 1) : n;
     }
 
-    /** perkey 模式下给每个 key 生成独立的 xml 文件名。 */
-    private static String xmlOf(String baseOut, String key, String xml) {
-        if (xml == null) return null;
-        if (xml.endsWith(".xml")) {
-            return new File(baseOut, key + ".xml").getPath();
-        }
-        return new File(xml, key + ".xml").getPath();
+    /**
+     * 解析 --xml / --csv 的目标：
+     *   - null              -> null（不生成该格式）
+     *   - 以 .xml/.csv 结尾  -> 视为显式文件，原样返回
+     *   - 其他（目录或裸名）  -> 视为目录，写入 <arg>/<baseName>.<ext>
+     * baseName 由调用方按输入 exec 文件名派生（coverage-1.exec -> coverage-1）。
+     */
+    private static String resolveReportFile(String arg, String ext, String baseName) {
+        if (arg == null) return null;
+        if (arg.endsWith(ext)) return arg;
+        return new File(arg, baseName + ext).getPath();
     }
 
-    private static String csvOf(String baseOut, String key, String csv) {
-        if (csv == null) return null;
-        if (csv.endsWith(".csv")) {
-            return new File(baseOut, key + ".csv").getPath();
+    /** exec 文件名 -> 报告文件名基名（去掉 .exec 后缀）；空名兜底为 jacoco。 */
+    private static String stemOf(File exec) {
+        String n = exec.getName();
+        if (n.endsWith(".exec")) {
+            n = n.substring(0, n.length() - ".exec".length());
         }
-        return new File(csv, key + ".csv").getPath();
+        return n.isEmpty() ? "jacoco" : n;
+    }
+
+    /** baseline 模式只出 HTML：htmlDir 为 null 时退化为一个临时目录（避免 NPE）。 */
+    private static File dirOrNull(File htmlDir, String fallbackName) {
+        if (htmlDir != null) return htmlDir;
+        final File tmp = new File("reports-" + fallbackName);
+        tmp.mkdirs();
+        return tmp;
     }
 
     private static void mkdirsForFile(File f) {
@@ -357,13 +386,5 @@ public final class ReportCommand {
         } catch (NumberFormatException e) {
             return def;
         }
-    }
-
-    /** 判断 store 是否为空（没有 ExecutionData 条目）。 */
-    private static boolean isEmpty(ExecutionDataStore store) {
-        for (ExecutionData ignored : store.getContents()) {
-            return false;
-        }
-        return true;
     }
 }
