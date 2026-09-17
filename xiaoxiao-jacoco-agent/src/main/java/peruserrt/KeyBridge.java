@@ -17,7 +17,7 @@ import java.util.concurrent.Callable;
  *
  * key 存于 InheritableThreadLocal：
  *   - new Thread() 创建的子线程自动继承（无需织入）；
- *   - 线程池线程是复用的、不重新继承，靠 {@link #wrap(Runnable)} / {@link #wrap(Callable)}
+ *   - 线程池线程是复用的、不重新继承，靠 {@link #wrap(Runnable)} / {@link # wrap(Callable)}
  *     在【提交时刻】捕获 key、在【执行时刻】设置并在 finally 恢复。
  */
 public final class KeyBridge {
