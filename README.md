@@ -204,13 +204,7 @@ key 原本存在 ThreadLocal 里，异步子线程拿不到 —— 覆盖要么�
 -javaagent:...=outdir=coverage,async=false
 ```
 
-自研线程池（任务先进自己的队列、再由别的线程取出执行，绕开了 JDK 提交入口）可手动包一层：
-
-```java
-executor.execute(CoverageTracer.wrap(myTask));   // Runnable
-executor.submit(CoverageTracer.wrap(myCallable)); // Callable
-```
-
+自研线程池（任务先进自己的队列、再由别的线程取出执行，绕开了 JDK 提交入口）可手动包一层；
 关闭后实测影响：线程池 / CompletableFuture 里的覆盖**全部丢失**（`async=false` 对照组结果为 0）。
 
 ---
