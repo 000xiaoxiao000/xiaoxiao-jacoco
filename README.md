@@ -66,19 +66,6 @@ agent 在 `HttpServlet.service` 入口织入钩子，读请求头 `X-Coverage-Ke
 -javaagent:...=outdir=coverage,autokey=smoke,includes=com.foo
 ```
 
-**③ `CoverageTracer` —— 代码里包一层（最细粒度）**
-
-```java
-import peruser.CoverageTracer;
-
-try (CoverageTracer t = CoverageTracer.start("case-login-error")) {
-    targetSystem.doWork();          // 这里执行的被插桩类（含它派生的异步任务），探针都归到该 key
-}
-// 等价显式写法
-CoverageTracer.begin("user-A");
-try { targetSystem.doWork(); } finally { CoverageTracer.end(); }
-```
-
 `start/begin` 设的是**线程局部** key（存在 `InheritableThreadLocal` 里，异步子线程也能拿到，见 §2.6），
 探针**直写该 key 的共享数组**，所以异步任务里即使不调 `end()` 也不会丢数据；
 `end/close` 只是退出该 key 的归属区间（线程池复用安全）。
@@ -132,7 +119,7 @@ java -jar xiaoxiao-jacoco-cli.jar report \
 > | `includes=web3Server` | ❌ 只匹配「类名**恰好**等于 `web3Server`」的类 → 几乎必然 **0 个类插桩、覆盖率全空** |
 > | `includes=web3Server*` | 只匹配类名以 `web3Server` **开头**的（仅当它位于包名开头） |
 > | `includes=*web3Server*` | ✅ 类名任意位置包含 `web3Server` |
-> | `includes=com.jettofocus.web3.*` | ✅ 该包及其子包下所有类（推荐） |
+> | `includes=com.remote3.web3.*` | ✅ 该包及其子包下所有类（推荐） |
 >
 > `includes` 匹配的是 **VM 类名**，不是 URL 路径（`/web301/testWeb3`）、不是模块名、不是包名简写。
 > 写错时 agent 启动日志会直接点名并给出改法；拿不准就先 `includes=*` 跑通，再看 §3.3.1 的自检输出。
@@ -276,8 +263,8 @@ dump [--address <addr>] [--port <port>] [--destfile <path>] [--reset] [--retry <
 父目录不存在会**自动创建**；文件名不以 `.exec` 结尾会**自动补上**。
 
 ```bash
-dump --address 172.16.11.13 --port 6300 --key 1 --destfile coverage/coverage-1.exec
-dump --address 172.16.11.13 --port 6300 --key 2 --destfile coverage/coverage-2.exec
+dump --address 172.xx.xx.10 --port 6300 --key 1 --destfile coverage/coverage-1.exec
+dump --address 172.xx.xx.10 --port 6300 --key 2 --destfile coverage/coverage-2.exec
 ```
 
 走官方二进制 TCP 协议，与 `jacococli dump` 互通。已存在同名 destfile 时按官方追加语义 OR 合并进去。
@@ -292,14 +279,14 @@ dump --address 172.16.11.13 --port 6300 --key 2 --destfile coverage/coverage-2.e
 
 ```bash
 # 一次抓 1 和 2 两个 key，分别落盘
-dump --address 172.16.11.13 --port 6300 --key 1,2 --destfile dumped.exec
+dump --address 172.xx.xx.10 --port 6300 --key 1,2 --destfile dumped.exec
 #   -> dumped-1.exec   dumped-2.exec
 
 # 只抓一个 key：直接写 --destfile
-dump --address 172.16.11.13 --port 6300 --key 1 --destfile cov-1.exec
+dump --address 172.xx.xx.10 --port 6300 --key 1 --destfile cov-1.exec
 
 # 抓完顺便清掉该 key 的内存累计（不影响其它 key）
-dump --address 172.16.11.13 --port 6300 --key 1 --reset --destfile cov-1.exec
+dump --address 172.xx.xx.10 --port 6300 --key 1 --reset --destfile cov-1.exec
 ```
 
 多 key 时是**覆盖写**（文件即该 key 的完整数据），不与旧文件 OR 合并，保证各 key 严格分离。
@@ -318,10 +305,10 @@ keys [--address <addr>] [--port <port>] [--retry <n>] [--quiet]
 不知道有哪些 key 时先跑它，再把结果喂给 `dump --key`。
 
 ```bash
-keys --address 172.16.11.13 --port 6300
+keys --address 172.xx.xx.10 --port 6300
 # 1
 # 2
-dump --address 172.16.11.13 --port 6300 --key 1,2 --destfile dumped.exec
+dump --address 172.xx.xx.10 --port 6300 --key 1,2 --destfile dumped.exec
 ```
 
 **它同时是「覆盖率为什么是空的」第一诊断入口**：除了 key 列表，还会回传 agent 端的自检计数
@@ -329,13 +316,13 @@ dump --address 172.16.11.13 --port 6300 --key 1,2 --destfile dumped.exec
 可直接抄的 `includes`。`dump --key K` 抓到 0 个类时也会自动拉一次这些数字。
 
 ```bash
-keys --address 172.16.11.13 --port 6300
-# [xiaoxiao-jacoco-cli] no key collected yet on 172.16.11.13:6300
+keys --address 172.xx.xx.10 --port 6300
+# [xiaoxiao-jacoco-cli] no key collected yet on 172.xx.xx.10:6300
 #   ! agent 到目前为止【一个类都没有插桩】(classes instrumented=0)
 #     -> 根因：includes/excludes 没匹配上。includes 匹配的是【VM 类名】(com/foo/Bar)，
 #        不是 URL 路径（/web301/testWeb3）、不是模块名（web3Server）、不是包名简写。
-#     -> 该进程里已加载的类，包名样例：[com/jettofocus/web3/*]
-#        建议把 agent 参数改成 includes=com/jettofocus/web3/*
+#     -> 该进程里已加载的类，包名样例：[com/remote3/web3/*]
+#        建议把 agent 参数改成 includes=com/remote3/web3/*
 #     -> 改完必须重启被测应用才生效。
 ```
 
@@ -354,7 +341,7 @@ keys --address 172.16.11.13 --port 6300
 随时跑 `stats`，无需等自检、无需 dump：
 
 ```bash
-java -jar xiaoxiao-jacoco-cli.jar stats --address 172.16.11.13 --port 6300
+java -jar xiaoxiao-jacoco-cli.jar stats --address 172.xx.xx.10 --port 6300
 # --limit <n>  最多列多少个类名，默认 50；--limit 0 列全部
 ```
 
@@ -391,12 +378,12 @@ java -jar xiaoxiao-jacoco-cli.jar stats --address 172.16.11.13 --port 6300
   -> 被 includes 过滤掉的类样例：[demo/App, demo/Controller, ...]
 ```
 
-> `stats` 是 xiaoxiao-jacoco 私有块（0x43/0x22）。旧版 agent 不认识会退化成一次普通 dump，
+> `stats` 是 xiaoxiao-jacoco 私有块（0x43/0x22）。
 > 命令会提示「不支持 stats，请升级 agent」。
 
 ### 3.3.3 `dumpclasses` —— 从运行中的 agent 拉回「被插桩类的原始字节码」（免 scp / 免镜像）
 
-docker / k8s 等环境**禁止 scp、不给被测机密码**，覆盖率报告的分母（classfiles）通常拿不到：
+覆盖率报告的分母（classfiles）：
 `classdumpdir` 落在容器里本地读不到、构建产物 jar 在镜像仓库里不好拉。本命令走 agent 已有的
 tcpserver 通道（与 `dump`/`keys`/`stats` 同源），把 agent 内存里缓存的【原始（未插桩）字节码】
 打成 zip 流回本地，彻底免容器访问、免镜像访问。
@@ -407,7 +394,7 @@ dumpclasses [--address <addr>] [--port <port>] [--outdir <dir>] [--zip <file>] [
 
 ```bash
 # 从被测机 agent 拉回 classfiles（解压到 ./libs，可直接当 report 的 --classfiles）
-java -jar xiaoxiao-jacoco-cli.jar dumpclasses --address 172.16.11.13 --port 6300 --outdir libs --zip libs.zip
+java -jar xiaoxiao-jacoco-cli.jar dumpclasses --address 172.xx.xx.10 --port 6300 --outdir libs --zip libs.zip
 
 # 然后出报告（classfiles 指向解压目录）
 java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec --classfiles libs --html reports
@@ -466,13 +453,13 @@ java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage \
 # -> reports/user-A/index.html   reports/user-B/index.html
 ```
 
-### 4.2 长跑服务：tcpserver + 跨机抓取（本机 192.168.6.130 ← 被测机 172.16.11.13）
+### 4.2 长跑服务：tcpserver + 跨机抓取（本机 192.168.6.130 ← 被测机 172.xx.xx.10）
 
 被测机上（**`address` 必须填被测机自己的 IP**，否则只绑回环，你连不上）：
 
 ```bash
 # includes 必须写【VM 类名】通配，写成 web3Server（模块名/URL 片段）会一个类都匹配不到
-java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.jettofocus.*,inclnolocationclasses=true,output=tcpserver,address=172.16.11.13,port=6300,headerkey=X-Coverage-Key \
+java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.remote3.*,inclnolocationclasses=true,output=tcpserver,address=172.xx.xx.10,port=6300,headerkey=X-Coverage-Key \
      -jar web3-1.0-SNAPSHOT.jar
 ```
 
@@ -485,7 +472,7 @@ java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=outdir=coverage,includes=com.jett
 **不带 `--key`（官方语义，拿到所有 key 的并集）**：
 
 ```bash
-java -jar xiaoxiao-jacoco-cli.jar dump --address 172.16.11.13 --port 6300 --destfile coverage/dumped.exec
+java -jar xiaoxiao-jacoco-cli.jar dump --address 172.xx.xx.10 --port 6300 --destfile coverage/dumped.exec
 java -jar xiaoxiao-jacoco-cli.jar report --exec coverage/dumped.exec --classfiles /path/to/classes --html reports
 ```
 
@@ -493,10 +480,10 @@ java -jar xiaoxiao-jacoco-cli.jar report --exec coverage/dumped.exec --classfile
 
 ```bash
 # 先看有哪些 key
-java -jar xiaoxiao-jacoco-cli.jar keys --address 172.16.11.13 --port 6300
+java -jar xiaoxiao-jacoco-cli.jar keys --address 172.xx.xx.10 --port 6300
 
 # 一次抓 1 和 2，分别落盘 dumped-1.exec / dumped-2.exec
-java -jar xiaoxiao-jacoco-cli.jar dump --address 172.16.11.13 --port 6300 --key 1,2 \
+java -jar xiaoxiao-jacoco-cli.jar dump --address 172.xx.xx.10 --port 6300 --key 1,2 \
      --destfile coverage/dumped.exec
 
 # 各自出报告
@@ -537,10 +524,10 @@ classfiles 则直接由 agent 在内存里缓存原始字节、经同一条 tcp 
 java -javaagent:/abs/xiaoxiao-jacoco-agent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.foo.* -jar your-app.jar
 
 # 2) 远程拉 exec（与容器无关，只需网络通 6300）
-java -jar xiaoxiao-jacoco-cli.jar dump --address 172.16.11.13 --port 6300 --destfile coverage/coverage-1.exec
+java -jar xiaoxiao-jacoco-cli.jar dump --address 172.xx.xx.10 --port 6300 --destfile coverage/coverage-1.exec
 
 # 3) 远程拉 classfiles（同一通道，免 scp / 免镜像）
-java -jar xiaoxiao-jacoco-cli.jar dumpclasses --address 172.16.11.13 --port 6300 --outdir libs --zip libs.zip
+java -jar xiaoxiao-jacoco-cli.jar dumpclasses --address 172.xx.xx.10 --port 6300 --outdir libs --zip libs.zip
 
 # 4) 本地出报告
 java -jar xiaoxiao-jacoco-cli.jar report coverage/coverage-1.exec --classfiles libs --html reports
