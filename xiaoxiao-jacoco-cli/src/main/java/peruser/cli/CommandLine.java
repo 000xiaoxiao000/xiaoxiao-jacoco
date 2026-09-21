@@ -177,7 +177,7 @@ public final class CommandLine {
         System.out.println();
         System.out.println("report 扩展（xiaoxiao-jacoco 专有）:");
         System.out.println("  --execdir <dir>         收集该目录下所有 *.exec，默认【合并成一份】报告（原生并集）");
-        System.out.println("  --perkey                每个 key 一份报告（需显式开启；key 取自文件名 <key> 段）");
+        System.out.println("  --perkey [key]          每个 key 一份报告；带 key 时只出该 key 的报告（--perkey 1）");
         System.out.println("  --merge                 所有 exec 按 classId OR 合并，额外出一份 all/ 并集报告");
         System.out.println("  --baseline-out <file>   采集方法级基线 JSON（Build N 跑完后）");
         System.out.println("  --baseline <file>       携带基线（Build N+1），回填未变方法的覆盖");

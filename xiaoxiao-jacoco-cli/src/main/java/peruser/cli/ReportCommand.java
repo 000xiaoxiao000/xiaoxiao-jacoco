@@ -66,6 +66,11 @@ public final class ReportCommand {
         final List<String> classPaths = CliArgs.pathList(args, "classfiles");
         final List<String> sourcePaths = CliArgs.pathList(args, "sourcefiles");
 
+        // perkey 可带可不带 key：--perkey = 每个 key 一份；--perkey <key> = 只出该 key 的报告
+        final String perkeyArg = CliArgs.flagOrValue(args, "perkey");
+        final boolean perkey = perkeyArg != null;
+        final String perkeyKey = (perkeyArg != null && !perkeyArg.isEmpty() && !"*".equals(perkeyArg)) ? perkeyArg : null;
+
         final List<File> execFiles = new ArrayList<>();
         for (String p : CliArgs.positional(args)) {
             File f = new File(p);
@@ -74,6 +79,34 @@ public final class ReportCommand {
         final List<String> execDirs = CliArgs.pathList(args, "execdir");
         for (String dir : execDirs) {
             execFiles.addAll(findExecs(new File(dir)));
+        }
+
+        // --perkey <key>：只保留该 key 的 exec（文件名 <prefix>-<key>.exec）
+        if (perkeyKey != null) {
+            final List<File> matched = new ArrayList<>();
+            for (File f : execFiles) {
+                if (perkeyKey.equals(keyOf(f))) matched.add(f);
+            }
+            if (matched.isEmpty()) {
+                final StringBuilder all = new StringBuilder();
+                for (File f : execFiles) {
+                    if (all.length() > 0) all.append(", ");
+                    all.append(keyOf(f)).append(" (").append(f.getName()).append(")");
+                }
+                throw new CliUsageException("--perkey " + perkeyKey + " 没有匹配的 exec"
+                        + (all.length() > 0 ? "；可用 key: " + all : "；当前没有找到任何 exec"));
+            }
+            execFiles.clear();
+            execFiles.addAll(matched);
+            if (!quiet) {
+                final StringBuilder names = new StringBuilder();
+                for (File f : execFiles) {
+                    if (names.length() > 0) names.append(", ");
+                    names.append(f.getName());
+                }
+                System.out.println("[xiaoxiao-jacoco-cli] --perkey " + perkeyKey + " 命中 " + execFiles.size()
+                        + " 个 exec: " + names);
+            }
         }
 
         // ----- 各原生格式独立解析 -----
@@ -96,8 +129,7 @@ public final class ReportCommand {
                     + "--html <dir> / --xml <file> / --csv <file>");
         }
 
-        // perkey 默认关闭（与原生一致）；仅 --execdir 收集文件、默认合并成一份；显式 --perkey 才拆分
-        final boolean perkey = CliArgs.has(args, "perkey");
+        // merge：所有 exec 按 classId OR 合并，额外出一份 all/ 并集报告
         final boolean merge = CliArgs.has(args, "merge");
 
         // ===== 1) 采集基线 =====
@@ -127,13 +159,14 @@ public final class ReportCommand {
                         "all", encoding, tabWidth, quiet, "merge");
             }
             // --merge 是【额外的】并集报告：多 key 时继续往下出每个 key 各自的报告
-            if (!(perkey && execFiles.size() > 1)) {
+            if (!(perkey && perkeyKey == null && execFiles.size() > 1)) {
                 return;
             }
         }
 
         // ===== 3) 按 key / 按文件拆分报告（每 exec 一份，文件名 = exec 文件名） =====
-        if (perkey && execFiles.size() > 1) {
+        // --perkey <key> 已在上游把 exec 过滤到该 key，这里不再逐文件拆分
+        if (perkey && perkeyKey == null && execFiles.size() > 1) {
             for (File exec : execFiles) {
                 final String stem = stemOf(exec);
                 final ExecFileLoader loader = new ExecFileLoader();
@@ -157,7 +190,9 @@ public final class ReportCommand {
         // 单个 exec（或官方默认：多个 exec 合并成一份并集报告）
         final ExecFileLoader loader = loadExecFiles(execFiles, quiet);
         // 目录型 --xml/--csv 文件名默认 = 输入 exec 文件名（去掉 .exec）；多 exec 合并（无 perkey）则用 jacoco
-        final String singleBase = (execFiles.size() == 1) ? stemOf(execFiles.get(0)) : "jacoco";
+        // --perkey <key> 命中多个同名 key 的 exec 时，报告基名用 key 本身
+        final String singleBase = (execFiles.size() == 1) ? stemOf(execFiles.get(0))
+                : (perkeyKey != null ? perkeyKey : "jacoco");
         final File htmlUse = htmlDir != null ? new File(htmlDir) : null;
         if (baselineIn != null) {
             BaselineReport.generate(loader.getExecutionDataStore(), classPaths, sourcePaths,
@@ -187,7 +222,7 @@ public final class ReportCommand {
         System.out.println();
         System.out.println("Options (xiaoxiao-jacoco extension):");
         System.out.println("  --execdir <dir>         收集该目录下所有 *.exec，默认合并成一份报告（原生并集）");
-        System.out.println("  --perkey                每个 key 一份报告（使用 --execdir 时默认开启）");
+        System.out.println("  --perkey [key]         每个 key 一份报告；带 key 时只出该 key 的报告（如 --perkey 1）");
         System.out.println("  --merge                 所有 exec 按 classId OR 合并，额外出一份 all/ 并集报告");
         System.out.println("  --baseline-out <file>   采集方法级基线 JSON");
         System.out.println("  --baseline <file>       携带基线，回填未变方法的覆盖");

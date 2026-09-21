@@ -304,7 +304,7 @@ report [<execfiles> ...] --classfiles <path> [--classfiles <path> ...] \
 | 参数 | 说明 |
 |---|---|
 | `--execdir <dir>` | 收集该目录下所有 `*.exec`，**默认合并成一份**报告（与原生多 exec 并集一致） |
-| `--perkey` | 显式按 key 拆分（默认**关闭**；key 取自文件名 `coverage-<key>.exec` 的 `<key>` 段） |
+| `--perkey [key]` | 按 key 拆分（默认**关闭**；key 取自文件名 `coverage-<key>.exec` 的 `<key>` 段）。**带 key 时只出该 key 的报告**：`--perkey 1` 只生成 key=1 的报告（报告落在 `--html` 目录本身，不再建 `<key>/` 子目录）；不带的 `--perkey` 才是「每个 key 一份」 |
 | `--merge` | 额外出一份所有 exec 的并集报告 `all/` |
 | `--baseline-out <json>` | 采集方法级基线（跨构建增量用，见 §5） |
 | `--baseline <json>` | 用基线做「方法级携带」，生成增量对比报告 |
@@ -312,7 +312,8 @@ report [<execfiles> ...] --classfiles <path> [--classfiles <path> ...] \
 > **原生格式独立开关**：`--html` / `--xml` / `--csv` 三者相互独立，只生成你指定的格式（与原生 `jacococli report` 一致）。
 > **报告文件名按输入 exec 命名**：`--xml <dir>` / `--csv <dir>` 传【目录】时，文件名默认 = 输入 exec 的文件名（去掉 `.exec`）：
 > - 单文件 `report coverage-1.exec --xml reports` → `reports/coverage-1.xml`（覆盖全 0 也照样按此命名）
-> - `--perkey` 下每份按各自 exec 文件名：`coverage-1.xml` / `coverage-2.xml`（HTML 子目录同名 `coverage-1/`）
+> - `--perkey`（不带值）下每份按各自 exec 文件名：`coverage-1.xml` / `coverage-2.xml`（HTML 子目录同名 `coverage-1/`）
+> - `--perkey 1` 只命中 `coverage-1.exec`：报告直接写到 `--html` 目录（无子目录），`--xml <dir>` 文件名 = 该 exec 名
 > - 多 exec 合并（不加 `--perkey`）→ `reports/jacoco.xml` / `jacoco.csv`
 > - `--merge` 的额外汇集报告 → `reports/all.xml` / `all.csv`
 > - 显式传 `.xml` / `.csv` 文件（如 `--xml reports/jacoco.xml`）则原样，不受上述规则影响。
@@ -554,6 +555,11 @@ java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --perkey \
      --classfiles /path/to/classes --sourcefiles /path/to/src --html reports
 # -> reports/user-A/index.html   reports/user-B/index.html
 # 不加 --perkey 时默认合并成一份 reports/index.html
+
+# 只想看某一个 key：--perkey <key>（只该 key 的报告，写在 reports 根下）
+java -jar xiaoxiao-jacoco-cli.jar report --execdir coverage --perkey user-A \
+     --classfiles /path/to/classes --html reports
+# -> reports/index.html（只有 user-A 的数据）
 ```
 
 ### 4.2 长跑服务：tcpserver + 跨机抓取（本机 192.168.6.130 ← 被测机 172.xx.xx.10）

@@ -19,6 +19,10 @@ final class CliArgs {
             "execdir", "baseline", "baseline-out",
             "destfile", "dest", "address", "port", "retry", "append", "key")));
 
+    /** 「可带可不带取值」的 option：--flag 或 --flag <value> 都合法。 */
+    private static final Set<String> OPTIONAL_VALUE_OPTS = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList("perkey")));
+
     private CliArgs() {
     }
 
@@ -29,15 +33,45 @@ final class CliArgs {
             String a = args[i];
             if (a == null || a.startsWith("--")) {
                 String key = keyOf(a);
-                // 只跳过「确实绑定到下一个 token 的取值」，避免把不带值的开关后的值误吞
-                if (VALUE_OPTS.contains(key) && keyOf(a) != null && !a.contains("=") && i + 1 < args.length) {
-                    i++;
+                if (keyOf(a) != null && !a.contains("=") && i + 1 < args.length) {
+                    // perkey 是「可带可不带取值」的选项：只有下一个 token 不是 option 时才算它的取值
+                    if (VALUE_OPTS.contains(key)) {
+                        i++;
+                    } else if (OPTIONAL_VALUE_OPTS.contains(key) && args[i + 1] != null
+                            && !args[i + 1].startsWith("--")) {
+                        i++;
+                    }
                 }
                 continue;
             }
             list.add(a);
         }
         return list;
+    }
+
+    /**
+     * 「可带可不带取值」的 option 取值：
+     *   --perkey 1   -> "1"（下一个 token 不是 option 才当取值）
+     *   --perkey=1   -> "1"
+     *   --perkey     -> ""（仅开关，不带值）
+     *   未出现        -> null
+     */
+    static String flagOrValue(String[] args, String key) {
+        String opt = "--" + key;
+        for (int i = 0; i < args.length; i++) {
+            String a = args[i];
+            if (a == null) continue;
+            if (a.equals(opt)) {
+                if (i + 1 < args.length && args[i + 1] != null && !args[i + 1].startsWith("--")) {
+                    return args[i + 1];
+                }
+                return "";
+            }
+            if (a.startsWith(opt + "=")) {
+                return a.substring(opt.length() + 1);
+            }
+        }
+        return null;
     }
 
     /** 取某个 option 的所有取值（重复传参时会有多个），支持 --key value 与 --key=value。 */
