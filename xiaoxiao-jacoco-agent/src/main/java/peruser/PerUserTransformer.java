@@ -47,6 +47,41 @@ public final class PerUserTransformer implements ClassFileTransformer {
                 return null;
             }
         }
+        // 跨服务出站（Feign/OkHttp/Apache/Dubbo/gRPC/Spring）：把当前 key 写进出站请求头，
+        // 让 B 服务（挂同一 agent + headerkey=）能读到同一个 key。默认关闭（httpkey=true）——
+        // 给业务请求加 header 属于改变目标系统的数据，必须显式开启；无 key 时请求与不开探针时完全一致。
+        // 这些客户端类通常不在 includes= 里，因此同样独立于覆盖率插桩、放在 shouldInstrument 之前。
+        if (options.httpKey && HttpKeyWeaver.isTarget(className)) {
+            try {
+                byte[] out = HttpKeyWeaver.weave(buf, className, loader);
+                if (out != null) {
+                    if (options.debug) {
+                        System.out.println("[xiaoxiao-jacoco] http outbound woven: " + className);
+                    }
+                    return out;
+                }
+            } catch (Throwable t) {
+                System.err.println("[xiaoxiao-jacoco] http outbound weave failed: " + className + " -> " + t);
+                return null;
+            }
+        }
+        // 跨服务【入站】RPC（Dubbo provider / gRPC server）：B 侧没有 Servlet 入口时，
+        // 靠本织入从调用载体（Invocation 附件 / gRPC Metadata）读回 key，补齐「A 出站 + B 入站」闭环。
+        // 入站只读、不写任何业务数据，因此默认随 headerkey= / httpkey=true 生效（rpckey=false 可关）。
+        if (options.rpcKey && RpcInKeyWeaver.isTarget(className)) {
+            try {
+                byte[] out = RpcInKeyWeaver.weave(buf, className, loader);
+                if (out != null) {
+                    if (options.debug) {
+                        System.out.println("[xiaoxiao-jacoco] rpc inbound woven: " + className);
+                    }
+                    return out;
+                }
+            } catch (Throwable t) {
+                System.err.println("[xiaoxiao-jacoco] rpc inbound weave failed: " + className + " -> " + t);
+                return null;
+            }
+        }
         // parallelStream 归属：织入 ForkJoinTask.fork/doExec，让流里的覆盖率也能按请求细分。
         // 默认关闭（streamkey=true 才启用）—— ForkJoinTask 是并行热路径，不经用户同意不插指令。
         if (options.streamPropagate && BootClassInjector.available() && StreamKeyWeaver.isTarget(className)) {

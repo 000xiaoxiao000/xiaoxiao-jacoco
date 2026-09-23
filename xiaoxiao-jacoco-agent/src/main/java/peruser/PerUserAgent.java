@@ -48,6 +48,8 @@ public final class PerUserAgent {
         RequestKeyHook.setDebug(o.debug);
         ClassCache.configure(o.classCacheMaxBytes);
         MqKeyHook.configure(o.mqHeader, o.debug);
+        HttpKeyHook.configure(o.httpHeader, o.debug);
+        RpcInKeyHook.configure(o.httpHeader, o.debug);
         inst.addTransformer(new PerUserTransformer(o), true);
 
         if (o.asyncPropagate) {
@@ -66,7 +68,13 @@ public final class PerUserAgent {
                         : "  async=on(但 bootstrap 注入失败，仅 new Thread 生效)")
                     : "  async=off")
                 + (o.streamPropagate ? "  streamkey=on(parallelStream 已传递 key)" : "")
-                + (o.mqKey ? "  mqkey=on(" + o.mqHeader + " 已注入 Kafka/RocketMQ/RabbitMQ 收发两端)" : ""));
+                + (o.mqKey ? "  mqkey=on(" + o.mqHeader + " 已注入 Kafka/RocketMQ/RabbitMQ 收发两端)" : "")
+                + (o.httpKey
+                    ? "  httpkey=on(" + o.httpHeader + " 已注入 Feign/OkHttp/Apache/Dubbo/gRPC 出站请求)"
+                    : "  httpkey=off(跨服务调用不会自动带 key，B 侧需 autokey/setkey 或手工传头)")
+                + (o.rpcKey
+                    ? "  rpckey=on(" + o.httpHeader + " 已从 Dubbo provider / gRPC server / WebFlux Controller 入站读取 key)"
+                    : "  rpckey=off(Dubbo/gRPC 入站不读 key)"));
         System.out.println("[xiaoxiao-jacoco] 过滤条件: includes=" + o.agentOptions().getIncludes()
                 + "  excludes=" + o.agentOptions().getExcludes()
                 + "  exclclassloader=" + o.agentOptions().getExclClassloader()

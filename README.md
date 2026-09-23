@@ -135,6 +135,9 @@ java -jar xiaoxiao-jacoco-cli.jar report \
 | `streamkey=true` | parallelStream / ForkJoinTask 的 key 传递，见 §2.7（**默认关**：热路径） | `false` |
 | `mqkey=true` | 跨进程 MQ 的 key 透传（Kafka / RocketMQ / RabbitMQ），见 §2.8（**默认关**：会加消息头） | `false` |
 | `mqheader=NAME` | MQ 透传用的 header / property 名 | `X-Coverage-Key` |
+| `httpkey=true` | 跨服务出站调用（Feign / OkHttp / Apache / Dubbo / gRPC / Spring）的 key 透传，见 §2.9（**默认关**：会加请求头） | `false` |
+| `httpheader=NAME` | 出站透传用的 header 名（缺省继承 `headerkey=` 的名字） | `X-Coverage-Key` |
+| `rpckey=true\|false` | 跨服务入站归属（Dubbo provider / gRPC server / Spring WebFlux），见 §2.10（**只读**，默认随 `headerkey=` / `httpkey=true` 生效） | 随上两者 |
 | `classcache=true\|false` | 内存缓存被插桩类的原始字节（`dumpclasses` 依赖它） | `true` |
 | `classcachemax=MB` | classcache 的字节上限，超过即停止缓存 | `64` |
 | `cleanup=24h` | 定期清理 outdir 下的旧 exec/class（`30m` / `2h` / `1d`，纯数字按小时） | 不启用 |
@@ -272,9 +275,97 @@ key 存在 ThreadLocal 里，跨 JVM 就断了。开启后由探针在 MQ 客户
 
 > 为什么默认关：加消息头属于**改变目标系统的数据**，必须由使用方显式点头。
 
-### 2.9 兜底：`CoverageTracer`（只在自研队列等极少数场景需要）
+### 2.9 跨服务调用归属：`httpkey=true`（默认关闭）
 
-`headerkey` / `autokey` / `async` / `streamkey` / `mqkey` / `cli setkey` 覆盖了绝大多数场景，
+A 服务带着 `X-Coverage-Key` 进来，A 再用 Feign / HttpClient 调 B —— **这个头不会自动跟过去**，
+B 侧读不到 key，本次调用的覆盖直接丢弃。开启后由探针在【出站客户端】层面把当前 key 写进请求头，
+**业务代码一行都不用改**（不用再手写 Feign `RequestInterceptor` / HttpClient 拦截器）：
+
+| 客户端 | 织入点 | 载体 |
+|---|---|---|
+| Feign | `SynchronousMethodHandler.targetRequest(RequestTemplate)`（+ `RequestTemplate.request()` 兜底） | `RequestTemplate.header` |
+| OkHttp 3/4（含 Retrofit） | `Request$Builder.build()` | `addHeader` |
+| Apache HttpClient 4.3+ | `InternalHttpClient` / `MinimalHttpClient.doExecute(...)` | `HttpRequest.addHeader` |
+| Apache HttpClient 5.x | `InternalHttpClient.doExecute(...)` | `ClassicHttpRequest.addHeader` |
+| Dubbo 2.x / 3.x | `AbstractClusterInvoker.invoke(Invocation)` | Invocation 附件（`setObjectAttachment` / `setAttachment`），兜底 `RpcContext` 客户端附件 |
+| gRPC | `ClientCallImpl.start(Listener, Metadata)` | `Metadata` |
+| Spring 通用兜底 | `AbstractClientHttpRequest.getHeaders()`（含 reactive 版） | `HttpHeaders` —— 一个类覆盖 RestTemplate / WebClient 的全部 ClientHttpRequest 实现 |
+
+```bash
+# A 服务：入站用 headerkey 归属，出站把同一个 key 透传给 B（header 名自动同名，无需配两遍）
+-javaagent:...=headerkey=X-Coverage-Key,httpkey=true,includes=com.foo.*,output=tcpserver,address=0.0.0.0,port=6300
+
+# B 服务：原样读取同一个头
+-javaagent:...=headerkey=X-Coverage-Key,includes=com.bar.*,output=tcpserver,address=0.0.0.0,port=6301
+```
+
+透传用的 header 名优先级：`httpheader=<名>` > `headerkey=<名>` > 默认 `X-Coverage-Key`。
+取 key 的口径与归属完全一致（线程 key → 全局 key → autokey 合并 key），
+**「归属到哪个 key」和「透传出去哪个 key」永远是同一个**。
+
+约束与兜底（与 `mqkey` 一致）：
+
+- 只写标准 header 区，**已有同名 header 一律跳过**，绝不覆盖业务或网关已设置的值；
+- **无 key 时零动作**：当前线程没归属就不写头，请求与不开探针时逐字节一致；
+- 写不进去（如 Spring 的只读 `readOnlyHttpHeaders`）或反射不到方法 → 静默放弃，绝不影响发请求；
+- 织入点按「类名 + 方法签名」精确匹配，版本对不上就匹配不到 —— 安全降级；
+- 织入前会确认目标类的类加载器能解析 `peruser.HttpKeyHook`，看不见就不织（防 `NoClassDefFoundError`）；
+- 这些客户端类通常不在 `includes=` 里，因此本织入独立于覆盖率插桩单独走一条分支。
+
+### 2.10 跨服务入站归属：`rpckey`（Dubbo provider / gRPC server / WebFlux，默认随 headerkey / httpkey 生效）
+
+上一段的 ⚠️ 已经解除：B 侧即使**没有 Servlet**（A→B 走 Dubbo / gRPC，或 B 本身就是 WebFlux），探针也能在
+**业务方法执行前**从调用载体里读回 key 并归属，业务代码同样一行都不用改。
+
+| 服务端 | 织入点 | 载体 | 形态 |
+|---|---|---|---|
+| Dubbo 3.x / 2.7 | `AbstractInvoker.invoke(Invocation)`（所有 protocol 的最终执行入口） | Invocation 附件（`getObjectAttachment` / `getAttachment`） | `try { 原方法体 } finally { exit() }` |
+| Dubbo 3.x / 2.7 | `ContextFilter.invoke(Invoker, Invocation)`（provider 侧 `@Activate(PROVIDER)`） | 同上 | 同上 |
+| Dubbo 2.6- | `com.alibaba.dubbo.*` 同名两个类 | 同上 | 同上 |
+| gRPC（grpc-stub 生成的服务） | `ServerCalls$UnaryServerCallHandler.startCall(ServerCall, Metadata)`、`$StreamingServerCallHandler.startCall(...)` | 请求 `Metadata` | 入口 `enter` |
+| gRPC | `ServerCallImpl.close(Status, Metadata)`（本次调用结束） | — | 出口 `exit` |
+| **Spring WebFlux**（注解式 `@RestController`） | `InvocableHandlerMethod.lambda$invoke$N(ServerWebExchange, BindingContext, Object[])` —— controller 方法就在该 lambda 内被 `Method.invoke` **同步**调用 | `ServerWebExchange` → `getRequest().getHeaders().getFirst(name)`（`HttpHeaders` 大小写不敏感） | `try { 原方法体 } finally { exit() }` |
+
+```bash
+# B 服务（Dubbo provider / gRPC server）：和 HTTP 侧写法完全一样，不用为 RPC 多配任何参数
+-javaagent:...=headerkey=X-Coverage-Key,includes=com.bar.*,output=tcpserver,address=0.0.0.0,port=6301
+```
+
+开关与命名：
+
+- 入站是**只读**动作（不给请求加任何字段、不改业务数据），所以**不额外收用户同意**：
+  只要配了 `headerkey=` 或 `httpkey=true`，`rpckey` 就自动为 on；`rpckey=true` / `rpckey=false` 可显式开关。
+- 读的 header / 附件名与出站写的是同一个（优先级 `httpheader=` > `headerkey=` > `X-Coverage-Key`），
+  **A 用什么头出去、B 就用什么头进来**，天然同名，不存在配错。
+
+约束与兜底：
+
+- **读不到 key 就零动作**：没有探针流量标识的调用与不开探针时行为完全一致，不会误归属；
+- 同一 key 重复进入（filter → invoker 两层都命中）**只归属一次**，不产生嵌套计数；
+- gRPC 的 enter / exit 不在同一个方法里（startCall / close），万一 close 没走到，
+  下一次 enter 会**兜底收尾**上一次归属，绝不把 key 泄漏到复用线程上污染后面的请求；
+- 反射读不到方法 / 抛任何异常 → 静默放弃，绝不影响业务被调；
+- 同样按「类名 + 方法签名」精确匹配（已核对 Dubbo 2.6/2.7/3.x、gRPC 1.27 / 1.46 / 1.70、
+  Spring WebFlux 5.3.x / 6.2.x 签名一致），版本对不上就匹配不到 —— 安全降级；
+  织入前同样检查类加载器能否解析 `peruser.RpcInKeyHook`。
+
+**WebFlux 的两个注意点**：
+
+- 织入点不是 `HttpWebHandlerAdapter#handle`（统一入站口）。那个方法返回 `Mono`、**立即返回**，
+  业务要等 subscribe 才执行 —— 在那里用 `try/finally` 会在业务跑之前就退出。
+  真正的业务窗口是 `InvocableHandlerMethod` 里那个 lambda（`lambda$invoke$N`，编号随 Spring 版本变，
+  故按**前缀**匹配），且它手里就拿着 `exchange`，能直接读请求头，不需要 pending 暂存 / 跨线程传递。
+- 归属范围是「controller 方法同步执行窗口」，与 Servlet 侧 `HttpServlet.service` 的语义一致：
+  controller 返回 `Mono` 之后、在 `flatMap` / `publishOn` 切走的线程上继续跑的代码不在窗口内
+  （这部分靠 `async` 线程池传播覆盖）。
+
+> 尚未覆盖：纯 `grpc-core` 自建 handler（不走 `grpc-stub` 生成代码）、
+> WebFlux **函数式路由**（`HandlerFunction` / `RouterFunction`，handler 是业务自己的类、类名不定）。
+> 这类场景仍可用 `autokey=<k>` 或 `cli setkey --key <k>` 兜底。
+
+### 2.11 兜底：`CoverageTracer`（只在自研队列等极少数场景需要）
+
+`headerkey` / `autokey` / `async` / `streamkey` / `mqkey` / `httpkey` / `cli setkey` 覆盖了绝大多数场景，
 而且都**不需要业务代码配合**。剩下的唯一场景是：同进程内任务先进入**自研队列**（不走 JDK 提交入口），
 再由别的线程捞起执行 —— 探针无从知晓你们的队列在哪里，这时才需要在入队处包一层
 

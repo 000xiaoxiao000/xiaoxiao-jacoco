@@ -38,6 +38,8 @@ import java.util.Map;
  *   streamkey=true|false       parallelStream 的 key 传递（织入 ForkJoinTask），默认 false
  *   mqkey=true|false           跨进程 MQ 的 key 透传（Kafka/RocketMQ/RabbitMQ），默认 false
  *   mqheader=NAME              MQ 透传用的 header / property 名，默认 X-Coverage-Key
+ *   httpkey=true|false         跨服务出站调用（Feign/OkHttp/Apache/Dubbo/gRPC/Spring）的 key 透传，默认 false
+ *   httpheader=NAME            出站透传用的 header 名，缺省继承 headerkey= 的名字，再缺省 X-Coverage-Key
  *   classcachemax=MB           classcache 的字节上限（MB），默认 64；超过即停止缓存
  *
  * 【设计底线：探针适应目标系统，探针不影响目标系统】
@@ -74,6 +76,10 @@ public final class Options {
     final boolean streamPropagate;     // parallelStream（ForkJoinTask）key 传递，默认关（热路径）
     final boolean mqKey;               // 跨进程 MQ 的 key 透传，默认关（会给消息加 header）
     final String mqHeader;             // MQ 透传用的 header / property 名，默认 X-Coverage-Key
+    final boolean httpKey;             // 跨服务出站调用的 key 透传，默认关（会给请求加 header）
+    final String httpHeader;           // 出站透传用的 header 名，缺省继承 headerkey，再缺省 X-Coverage-Key
+    final boolean rpcKey;              // 跨服务入站 RPC（Dubbo provider / gRPC server）的 key 归属，
+                                       // 只读动作，默认随 headerkey=/httpkey=true 生效，rpckey=true/false 可显式开关
     final boolean debug;               // 打印插桩/归属明细，排障用
     final boolean classCache;          // 是否内存缓存被插桩类的原始字节（dumpclasses 用），默认开
     final long classCacheMaxBytes;     // classcache 的字节上限（默认 64MB）
@@ -126,6 +132,17 @@ public final class Options {
         this.mqKey = "true".equalsIgnoreCase(String.valueOf(kv.get("mqkey")));
         String mh = emptyToNull(kv.get("mqheader"));
         this.mqHeader = (mh != null) ? mh : MqKeyHook.DEFAULT_HEADER;
+        this.httpKey = "true".equalsIgnoreCase(String.valueOf(kv.get("httpkey")));
+        String hh = emptyToNull(kv.get("httpheader"));
+        // 出站 header 名：显式 httpheader= > 入站 headerkey=（A 用什么头进来就用什么头出去，天然同名）> 默认
+        this.httpHeader = (hh != null) ? hh
+                : (this.headerKey != null ? this.headerKey : HttpKeyHook.DEFAULT_HEADER);
+        // 入站是「只读」动作（不给请求加任何字段），所以不额外收用户同意：
+        // 只要用户明确要按请求头归属（headerkey=）或要跨服务透传（httpkey=true），入站侧就自动配套开启。
+        String rk = kv.get("rpckey");
+        this.rpcKey = (rk != null && !rk.isEmpty())
+                ? "true".equalsIgnoreCase(rk)
+                : (this.headerKey != null || this.httpKey);
         this.debug = "true".equalsIgnoreCase(String.valueOf(kv.get("debug")));
         this.classCache = !"false".equalsIgnoreCase(String.valueOf(kv.get("classcache")));
         this.classCacheMaxBytes = parseMegaBytes(kv.get("classcachemax"), 64);
@@ -147,7 +164,7 @@ public final class Options {
     /** 由原生 driver 之外的 key（xiaoxiao/peruser 扩展参数） */
     private static final java.util.Set<String> EXTENSION_KEYS = new java.util.HashSet<>(java.util.Arrays.asList(
             "outdir", "autokey", "headerkey", "cleanup", "async", "streamkey", "mqkey", "mqheader",
-            "debug", "classcache", "classcachemax"));
+            "httpkey", "httpheader", "rpckey", "debug", "classcache", "classcachemax"));
 
     /** 官方 JaCoCo agent 支持的全部参数（其余未知参数只告警、不报错，避免拖累启动脚本） */
     private static final java.util.Set<String> OFFICIAL_KEYS = new java.util.HashSet<>(java.util.Arrays.asList(
@@ -233,7 +250,7 @@ public final class Options {
         // ---- 布尔参数：必须是 true/false ----
         for (String boolKey : new String[]{AgentOptions.APPEND, AgentOptions.DUMPONEXIT,
                 AgentOptions.INCLBOOTSTRAPCLASSES, AgentOptions.INCLNOLOCATIONCLASSES, AgentOptions.JMX,
-                "async", "streamkey", "mqkey", "classcache"}) {
+                "async", "streamkey", "mqkey", "httpkey", "classcache"}) {
             String v = kv.get(boolKey);
             if (v != null && !"true".equalsIgnoreCase(v.trim()) && !"false".equalsIgnoreCase(v.trim())) {
                 throw new IllegalArgumentException(

@@ -106,15 +106,8 @@ public final class MqKeyHook {
      * 这样「探针看到的 key」与「探针透传出去的 key」永远是同一个，不会出现归属错位。
      */
     private static String effectiveKey() {
-        String k = peruserrt.KeyBridge.get();
-        if (k != null) {
-            return k;
-        }
-        k = ThreadProbeStore.getCurrentKey();
-        if (k != null) {
-            return k;
-        }
-        return ThreadProbeStore.isMerge() ? ThreadProbeStore.mergeKey() : null;
+        // 与 HttpKeyHook 共用同一份口径，保证「归属的 key」与「透传出去的 key」永远一致
+        return EffectiveKey.get();
     }
 
     // ================= 反射读写 =================
