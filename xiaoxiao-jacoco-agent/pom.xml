@@ -38,7 +38,8 @@
     </dependencies>
 
     <build>
-        <finalName>xiaoxiao-jacoco-agent</finalName>
+        <!-- ${jar.suffix}：默认空（剥离调试信息的交付版）；-Pdebug-symbols 时为 -debug（内部排障版） -->
+        <finalName>xiaoxiao-jacoco-agent${jar.suffix}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -98,8 +99,9 @@
                                         <Agent-Class>peruser.PerUserAgent</Agent-Class>
                                         <Can-Redefine-Classes>true</Can-Redefine-Classes>
                                         <Can-Retransform-Classes>true</Can-Retransform-Classes>
-                                        <Implementation-Title>xiaoxiao-jacoco-agent</Implementation-Title>
-                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                        <!-- 这里【刻意不写】Implementation-Title / Implementation-Version：
+                                             它们会暴露实现名与版本，对反编译方是白送的指纹；
+                                             MANIFEST 里只保留 JVM 真正要读的四个入口属性。 -->
                                     </manifestEntries>
                                 </transformer>
                             </transformers>

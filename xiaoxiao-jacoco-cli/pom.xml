@@ -45,7 +45,8 @@
     </dependencies>
 
     <build>
-        <finalName>xiaoxiao-jacoco-cli</finalName>
+        <!-- ${jar.suffix}：默认空（剥离调试信息的交付版）；-Pdebug-symbols 时为 -debug（内部排障版） -->
+        <finalName>xiaoxiao-jacoco-cli${jar.suffix}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -85,8 +86,7 @@
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <manifestEntries>
                                         <Main-Class>peruser.cli.CommandLine</Main-Class>
-                                        <Implementation-Title>xiaoxiao-jacoco-cli</Implementation-Title>
-                                        <Implementation-Version>${project.version}</Implementation-Version>
+                                        <!-- 与 agent 一致：刻意不写 Implementation-*，不暴露实现名与版本 -->
                                     </manifestEntries>
                                 </transformer>
                             </transformers>

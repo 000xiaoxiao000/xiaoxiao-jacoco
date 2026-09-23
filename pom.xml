@@ -28,6 +28,21 @@
         <!-- 目标字节码 = Java 8，保证在 Java 8+ 的目标 JVM 上可加载 -->
         <maven.compiler.release>8</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 防反编译 L0：默认【不写调试信息】（等价 javac -g:none）。
+             行号 / 局部变量名 / 源文件名都不会进 class，反编译产物失去与源码逐行对照的能力，
+             变量名也只会剩下 var1 / var2 这种占位名。
+             ⚠️ 这不影响覆盖率：JaCoCo 读的是【被测业务类】的行号，与探针自身的调试信息无关。
+             排障要行号时：加 -Pdebug-symbols（产出 *-debug.jar，仅内部使用、不要外发），
+             或 -Djacoco.debug.level=source,lines,vars。
+             ⚠️ 坑：maven-compiler-plugin 的 debug 参数①没有 user property（设 maven.compiler.debug 无效），
+             ②debug=false 时 plexus-compiler 【根本不传 -g*】，于是落到 javac 默认（-g:source,lines），
+             行号和源文件名照样进 class。所以实际是用 <debuglevel> 精确控制：none = 不写任何调试信息。 -->
+        <jacoco.debug.level>none</jacoco.debug.level>
+        <!-- 同理：不要把方法参数名写进 class（MethodParameters 属性），否则反编译能看见真实参数名 -->
+        <maven.compiler.parameters>false</maven.compiler.parameters>
+        <!-- 交付 jar 的文件名后缀：剥离版为空，-Pdebug-symbols 时为 -debug -->
+        <jar.suffix></jar.suffix>
         <asm.version>9.10.1</asm.version>
         <!-- 注意：jacoco 是本地定制构建（版本号带日期后缀），不是 Maven Central 的标准 0.8.15。
              为保证覆盖率格式/字节码与之前完全一致，必须用本地 .m2 里的定制版（见 setup-m2.sh）。 -->
@@ -68,6 +83,13 @@
                     <version>3.11.0</version>
                     <configuration>
                         <release>8</release>
+                        <!-- 防反编译 L0：不写调试信息（等价 javac -g:none）。
+                             debug 恒为 true、由 debuglevel 决定写多少：none=全不写。
+                             （debug=false 是陷阱，见上面 properties 里的说明） -->
+                        <debug>true</debug>
+                        <debuglevel>${jacoco.debug.level}</debuglevel>
+                        <!-- 不写 MethodParameters：否则反编译能看见真实的方法参数名 -->
+                        <parameters>false</parameters>
                     </configuration>
                 </plugin>
                 <plugin>
@@ -75,7 +97,41 @@
                     <artifactId>maven-shade-plugin</artifactId>
                     <version>3.5.1</version>
                 </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.4.1</version>
+                    <configuration>
+                        <archive>
+                            <!-- 不写 META-INF/maven/**（会暴露 groupId / artifactId / version 与依赖树） -->
+                            <addMavenDescriptor>false</addMavenDescriptor>
+                            <manifest>
+                                <!-- 不写 Implementation-Title/Version、Build-Jdk-Spec 等构建环境信息。
+                                     （Premain-Class / Agent-Class / Main-Class 由 shade 显式写入，不受影响）
+                                     实测：addBuildEnvironmentEntries=false 单独无效，
+                                     必须 addDefaultEntries=false 才能去掉 Created-By / Build-Jdk-Spec；
+                                     Manifest-Version: 1.0 会保留（jar 规范要求）。 -->
+                                <addDefaultEntries>false</addDefaultEntries>
+                                <addDefaultImplementationEntries>false</addDefaultImplementationEntries>
+                                <addDefaultSpecificationEntries>false</addDefaultSpecificationEntries>
+                                <addBuildEnvironmentEntries>false</addBuildEnvironmentEntries>
+                            </manifest>
+                        </archive>
+                    </configuration>
+                </plugin>
             </plugins>
         </pluginManagement>
     </build>
+
+    <profiles>
+        <!-- 内部排障版：保留行号 / 变量名，产出 xiaoxiao-jacoco-agent-debug.jar 与 xiaoxiao-jacoco-cli-debug.jar。
+             ⚠️ 仅内部排障用，不要外发 —— 带行号等于把源码结构一起交出去。 -->
+        <profile>
+            <id>debug-symbols</id>
+            <properties>
+                <jacoco.debug.level>source,lines,vars</jacoco.debug.level>
+                <jar.suffix>-debug</jar.suffix>
+            </properties>
+        </profile>
+    </profiles>
 </project>

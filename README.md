@@ -39,6 +39,22 @@ xiaoxiao-jacoco-agent/target/xiaoxiao-jacoco-agent.jar   # fat jar，内含 asm 
 xiaoxiao-jacoco-cli/target/xiaoxiao-jacoco-cli.jar       # fat jar，内含 asm + jacoco core + report，Main-Class 已配好
 ```
 
+默认产物是**防反编译的剥离版**：不写调试信息（等价 `javac -g:none`），所以 jar 里没有行号、
+没有局部变量名、也没有源文件名；MANIFEST 里也只保留 JVM 真正要读的入口属性，不暴露实现名 / 版本 / 构建 JDK。
+（这**不影响覆盖率**：JaCoCo 读的是**被测业务类**的行号，与探针自身的调试信息无关。）
+
+```bash
+# 内部排障版：保留行号 / 变量名，产出 *-debug.jar（仅内部用，不要外发）
+mvn -o package -Pdebug-symbols
+# 不改 pom 的临时开法
+mvn -o package -Djacoco.debug.level=source,lines,vars
+```
+
+> ⚠️ 调试信息是靠 `debuglevel`（不是 `debug`）控制的：`maven-compiler-plugin` 的
+> `debug=false` 是个陷阱 —— plexus-compiler 在 `debug=false` 时**根本不传 `-g`**，
+> 于是落到 javac 默认（`-g:source,lines`），行号和源文件名照样进 class。
+> 另外 `debug` 参数没有 user property，设 `maven.compiler.debug` 无效。详见根 `pom.xml` 里的注释。
+
 > ⚠️ **不要用 Maven Central 标准 `org.jacoco:org.jacoco.core:0.8.15` 替换**：本项目依赖的是定制版
 > （版本号带日期后缀 `.202606040825`），内部 API / 覆盖率格式可能不一致。必须先用 `setup-m2.sh` 装进本地 `.m2`。
 
