@@ -91,6 +91,9 @@ public final class CommandLine {
             case "execinfo":
                 ExecInfoCommand.execute(rest);
                 break;
+            case "incremental":
+                IncrementalCommand.execute(rest);
+                break;
             case "version":
                 VersionCommand.execute(rest);
                 break;
@@ -113,8 +116,10 @@ public final class CommandLine {
             StatsCommand.usage();
         } else if ("dumpclasses".equals(cmd)) {
             DumpClassesCommand.usage();
-        } else if ("setkey".equals(cmd)) {
-            SetKeyCommand.usage();
+        } else if ("execinfo".equals(cmd)) {
+            ExecInfoCommand.usage();
+        } else if ("incremental".equals(cmd)) {
+            IncrementalCommand.usage();
         } else {
             System.err.println("usage: " + usageLine(cmd));
         }
@@ -140,6 +145,8 @@ public final class CommandLine {
                 return "xiaoxiao-jacoco-cli classinfo [<classlocations> ...] [--verbose]";
             case "execinfo":
                 return "xiaoxiao-jacoco-cli execinfo [<execfiles> ...] [--verbose]";
+            case "incremental":
+                return "xiaoxiao-jacoco-cli incremental [<execfiles> ...] --classfiles <path> --old-classfiles <path> [--sourcefiles <path>] [--old-sourcefiles <path>]";
             default:
                 return "xiaoxiao-jacoco-cli <command> [options]  (try: help)";
         }
@@ -161,6 +168,8 @@ public final class CommandLine {
         System.out.println("  instrument [<sourcefiles> ...] --dest <dir>               离线插桩 class/jar");
         System.out.println("  classinfo [<classlocations> ...]                          查看 class/jar 里的类与探针信息");
         System.out.println("  execinfo [<execfiles> ...]                                查看 exec 文件里的 session 与类信息");
+        System.out.println("  incremental [<execfiles> ...] --classfiles <path> --old-classfiles <path>");
+        System.out.println("                                                            两版 classfiles 比对，只显示变更位置的覆盖率");
         System.out.println("  version                                                   版本信息");
         System.out.println("  help                                                      本帮助");
         System.out.println();

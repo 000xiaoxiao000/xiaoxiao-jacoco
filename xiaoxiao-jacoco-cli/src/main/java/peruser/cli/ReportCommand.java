@@ -260,6 +260,7 @@ public final class ReportCommand {
             }
             AnalyzePaths.analyzePathInto(analyzer, f);
         }
+        AnalyzePaths.warnIfNoExecData(builder, store);
 
         final List<IReportVisitor> visitors = new ArrayList<>();
         final List<OutputStream> outputs = new ArrayList<>();

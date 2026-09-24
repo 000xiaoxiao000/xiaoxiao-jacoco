@@ -638,7 +638,90 @@ execinfo [<execfiles> ...] [--verbose] [--quiet] [--execdir <dir>]
 
 输出 sessions / classes / probes。
 
-### 3.7 `version` / `help`
+### 3.7 `incremental` —— 增量覆盖率报告（两版 classfiles 比对，只显示变更位置）
+
+```bash
+incremental [<execfiles> ...] --classfiles <新> --old-classfiles <旧> \
+            [--sourcefiles <新源码>] [--old-sourcefiles <旧源码>] \
+            [--html <dir>] [--xml <file>] [--csv <file>] [--json <file>] \
+            [--encoding <enc>] [--name <name>] [--tabwidth <n>] [--quiet]
+```
+
+把**两个构建产物**（新版 vs 旧版）做差异比对，生成的报告里**只保留变更位置的覆盖率数据与代码着色**：
+未变更的行不着色、也不计入分母。报告本身仍是标准 JaCoCo 报告（行号、样式、XML 格式完全不变），
+现有工具链可以直接吃。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `--classfiles <path>` | ✅ | 新版本 class 目录 / jar，可重复传参（多模块就传多个） |
+| `--old-classfiles <path>` | ✅ | 旧版本 class 目录 / jar，可重复传参 |
+| `--sourcefiles <path>` | | 新版源码根目录，可重复。**HTML 源码页着色依赖它** |
+| `--old-sourcefiles <path>` | | 旧版源码根目录，可重复。**可选**，见下 |
+| `--html <dir>` | 至少指定一种输出 | 报告目录，另出 `incremental-summary.html` 折叠视图 |
+| `--json <file>` | | 差异明细 JSON（默认 `<html>/incremental-diff.json`），供 CI 门禁 |
+
+产出：
+
+- `incremental-summary.html` —— 汇总卡片（变更行数 / 行·分支·方法·指令覆盖）+ 变更清单表 +
+  **变更片段（上下文 ±3 行，灰底 = 未变更上下文）**，即「只看改动」的那一页
+- 标准 JaCoCo HTML —— 源码页**只有变更行**着色，不改变原生行号与布局
+- `incremental-diff.json` —— 每个类的状态（ADDED / MODIFIED / REMOVED）、变更行号、方法变化
+  （`added` / `removed` / `modified` / `signature-changed`）
+
+### `--old-sourcefiles` 可以省略吗？可以
+
+行级精度有两条路径，自动选择：
+
+| 传参 | 走的路径 | 结果 |
+|---|---|---|
+| `--sourcefiles` + `--old-sourcefiles` | 源码文本 LCS | 最准，**注释行 / 纯格式行的改动也能识别** |
+| **只有 `--sourcefiles`** | 两版字节码的**指令序列 LCS** | 同样是**行级**，新版源码仍正常着色 |
+| 两个都不传 | 两版字节码的指令序列 LCS | 同样是行级，但没有源码页（无法着色） |
+
+指令序列 LCS 的做法：把一个方法按源码行打包成若干「指令签名」（`opcode + 常量操作数`，
+刻意**忽略行号与局部变量槽号**），两版做 LCS，新版里没能匹配上的那些行就是变更行。
+
+> 为什么不能只比对 `LineNumberTable` 的行号？插入一行会让后面所有行号整体 +1，
+> 而且新旧不同内容的行可能恰好行号相同而被判成「没变」（实测某 web3 例子：
+> 行号 LCS 得出 `{15,17}`，真相是 `{8,12}`）。行号会平移、会被"顶替"，必须用指令内容。
+
+实测对照（`demo.WebController.web3`：签名加参数 `num4` + 新增一行 `response.put("num4", num4)`）：
+
+| 传参 | 变更行 | 行覆盖 |
+|---|---|---|
+| 两版源码 | `[8, 12]` | 1/1 |
+| 只给 `--sourcefiles` | `[8, 12]` | 1/1 |
+| 都不给 | `[8, 12]` | 1/1 |
+
+变更行**本身就是分支行**时，分支覆盖也会带出来：把 `num2 == 1` 改成 `num2 == 2`，
+只跑 true 一侧 → 变更行 `[14]`、**分支 4/8 (50%)**，HTML 该行标黄 `4 of 8 branches missed.`。
+
+### 两条必须记住的约束
+
+1. **变更行的覆盖只能来自新版 exec**。探针位图随字节码变化，v2 部署后必须重新跑用例采集，
+   否则变更行显示 0 覆盖 —— 那是真缺数据，不是工具问题。
+   （未变更方法的历史覆盖可用 `--baseline` 方法级携带，见 §5。）
+2. **改注释不会被判为变更**：方法 hash 基于字节码（`SKIP_DEBUG`、忽略行号），
+   注释改动不动字节码，不会污染增量报告（但方法体真的改了时，同一方法内的注释改动会被源码 LCS 算成变更行）。
+3. 每次发版请把**旧版 classfiles 留档**，否则无从比对。exec 与 classfiles 版本不一致时命令会明确告警。
+
+示例：
+
+```bash
+# v1 发版时留档
+cp -r build1/classes /data/builds/0001/classes
+
+# v2 部署后重新采集 exec
+java -jar xiaoxiao-jacoco-cli.jar dump --address 10.x.x.x --port 6300 --destfile v2.exec
+
+# 出增量报告（只有新版源码也行）
+java -jar xiaoxiao-jacoco-cli.jar incremental v2.exec \
+     --classfiles build2/classes --old-classfiles /data/builds/0001/classes \
+     --sourcefiles build2/src/main/java \
+     --html reports-incr
+```
+
+### 3.8 `version` / `help`
 
 ---
 

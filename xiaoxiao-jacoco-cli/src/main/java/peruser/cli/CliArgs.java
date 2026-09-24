@@ -12,12 +12,15 @@ import java.util.Set;
  */
 final class CliArgs {
 
-    /** 需要「吃掉」下一个 token 作为取值的 option。 */
-    private static final Set<String> VALUE_OPTS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            "classfiles", "sourcefiles",
-            "html", "xml", "csv", "encoding", "name", "tabwidth",
-            "execdir", "baseline", "baseline-out",
-            "destfile", "dest", "address", "port", "retry", "append", "key")));
+    /**
+     * 「不吃取值」的纯开关 option。
+     *
+     * 判定顺序改为反向白名单：除了这些开关（以及下面 OPTIONAL_VALUE_OPTS 的特例），
+     * 其它所有 --xxx 都默认吃掉下一个 token 作为取值。这样新增带值的 option 不需要来这里登记，
+     * 否则它的取值会被当成位置参数，报出一堆莫名其妙的错误（典型的："xxx (Is a directory)"）。
+     */
+    private static final Set<String> BOOLEAN_OPTS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+            "help", "quiet", "reset", "clear", "merge", "verbose", "debug", "force")));
 
     /** 「可带可不带取值」的 option：--flag 或 --flag <value> 都合法。 */
     private static final Set<String> OPTIONAL_VALUE_OPTS = Collections.unmodifiableSet(
@@ -33,12 +36,15 @@ final class CliArgs {
             String a = args[i];
             if (a == null || a.startsWith("--")) {
                 String key = keyOf(a);
-                if (keyOf(a) != null && !a.contains("=") && i + 1 < args.length) {
-                    // perkey 是「可带可不带取值」的选项：只有下一个 token 不是 option 时才算它的取值
-                    if (VALUE_OPTS.contains(key)) {
-                        i++;
+                if (key != null && !a.contains("=") && i + 1 < args.length) {
+                    if (BOOLEAN_OPTS.contains(key)) {
+                        // 纯开关，不吃取值
                     } else if (OPTIONAL_VALUE_OPTS.contains(key) && args[i + 1] != null
                             && !args[i + 1].startsWith("--")) {
+                        // perkey 带值：只有下一个 token 不是 option 时才算它的取值
+                        i++;
+                    } else {
+                        // 其余一律默认「吃取值」
                         i++;
                     }
                 }
